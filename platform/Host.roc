@@ -50,6 +50,8 @@ hosted [
     temp_dir!,
     tty_mode_canonical!,
     tty_mode_raw!,
+    pbkdf2_hmac_sha256,
+    decrypt_aes256_gcm,
 ]
 
 import InternalHttp
@@ -111,6 +113,10 @@ sqlite_columns! : Box {} => List Str
 sqlite_column_value! : Box {}, U64 => Result InternalSqlite.SqliteValue InternalSqlite.SqliteError
 sqlite_step! : Box {} => Result InternalSqlite.SqliteState InternalSqlite.SqliteError
 sqlite_reset! : Box {} => Result {} InternalSqlite.SqliteError
+
+# CRYPTO
+pbkdf2_hmac_sha256 : List U8, List U8, U32, U32 -> List U8
+decrypt_aes256_gcm : List U8, List U8, List U8, List U8 -> Result (List U8) Str
 
 # OTHERS
 current_arch_os! : {} => { arch : Str, os : Str }

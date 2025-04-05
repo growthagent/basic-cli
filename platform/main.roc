@@ -1,24 +1,25 @@
 platform "cli"
     requires {} { main! : List Arg.Arg => Result {} [Exit I32 Str]_ }
     exposes [
-        Path,
         Arg,
+        Cmd,
+        Crypto,
         Dir,
         Env,
         File,
         FileMetadata,
         Http,
+        Locale,
+        Path,
+        Sleep,
+        Sqlite,
         Stderr,
         Stdin,
         Stdout,
         Tcp,
+        Tty,
         Url,
         Utc,
-        Sleep,
-        Cmd,
-        Tty,
-        Locale,
-        Sqlite,
     ]
     packages {}
     imports []

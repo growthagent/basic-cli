@@ -340,6 +340,8 @@ pub fn init() {
         roc_fx_sqlite_prepare as _,
         roc_fx_sqlite_reset as _,
         roc_fx_sqlite_step as _,
+        roc_fx_decrypt_aes256_gcm as _,
+        roc_fx_pbkdf2_hmac_sha256 as _,
     ];
     #[allow(forgetting_references)]
     std::mem::forget(std::hint::black_box(funcs));
@@ -768,3 +770,15 @@ pub extern "C" fn roc_fx_sqlite_step(
 pub extern "C" fn roc_fx_sqlite_reset(stmt: RocBox<()>) -> RocResult<(), roc_sqlite::SqliteError> {
     roc_sqlite::reset(stmt)
 }
+
+/// Decrypts a ciphertext encrypted with AES256-GCM.
+#[no_mangle]
+pub extern "C" fn roc_fx_decrypt_aes256_gcm(ciphertext: &RocList<u8>, key: &RocList<u8>, nonce: &RocList<u8>, auth_tag: &RocList<u8>) -> RocResult<RocList<u8>, RocStr> {
+    roc_crypto::decrypt_aes256_gcm(ciphertext, key, nonce, auth_tag)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_pbkdf2_hmac_sha256(password: &RocList<u8>, salt: &RocList<u8>, iterations: u32, key_length: u32) -> RocList<u8> {
+    roc_crypto::pbkdf2_hmac_sha256(password, salt, iterations, key_length)
+}
+

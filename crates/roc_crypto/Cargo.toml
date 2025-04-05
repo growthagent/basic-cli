@@ -1,0 +1,15 @@
+[package]
+name = "roc_crypto"
+description = "Common functionality for Roc to interface with cryptography crates"
+
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+roc_std.workspace = true
+aes-gcm.workspace = true
+pbkdf2.workspace = true
+sha2.workspace = true
+
