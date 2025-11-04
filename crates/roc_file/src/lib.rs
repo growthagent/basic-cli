@@ -10,6 +10,9 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::{env, io};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt; // used for is_executable, is_readable, is_writable
+
 pub fn heap() -> &'static ThreadSafeRefcountedResourceHeap<BufReader<File>> {
     static FILE_HEAP: OnceLock<ThreadSafeRefcountedResourceHeap<BufReader<File>>> = OnceLock::new();
     FILE_HEAP.get_or_init(|| {
@@ -161,6 +164,198 @@ pub fn read_until<R: BufRead + ?Sized>(
 
 pub fn file_delete(roc_path: &RocList<u8>) -> RocResult<(), IOErr> {
     match std::fs::remove_file(path_from_roc_path(roc_path)) {
+        Ok(()) => RocResult::ok(()),
+        Err(err) => RocResult::err(err.into()),
+    }
+}
+
+/// Note: If the path is a directory or symlink, you probably don't want to call this function.
+pub fn file_size_in_bytes(roc_path: &RocList<u8>) -> RocResult<u64, IOErr> {
+    let rust_path = path_from_roc_path(roc_path);
+    let metadata_res = std::fs::metadata(rust_path);
+
+    match metadata_res {
+        Ok(metadata) => {
+            RocResult::ok(metadata.len())
+        }
+        Err(err) => {
+            RocResult::err(err.into())
+        }
+    }
+}
+
+pub fn file_is_executable(roc_path: &RocList<u8>) -> RocResult<bool, IOErr> {
+    let rust_path = path_from_roc_path(roc_path);
+
+    #[cfg(unix)]
+    {
+        let metadata_res = std::fs::metadata(rust_path);
+
+        match metadata_res {
+            Ok(metadata) => {
+                let permissions = metadata.permissions();
+                RocResult::ok(permissions.mode() & 0o111 != 0)
+            }
+            Err(err) => {
+                RocResult::err(err.into())
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        RocResult::err(IOErr{
+            msg: "Not yet implemented on windows.".into(),
+            tag: IOErrTag::Unsupported,
+        })
+    }
+}
+
+pub fn file_is_readable(roc_path: &RocList<u8>) -> RocResult<bool, IOErr> {
+    let rust_path = path_from_roc_path(roc_path);
+
+    #[cfg(unix)]
+    {
+        let metadata_res = std::fs::metadata(rust_path);
+
+        match metadata_res {
+            Ok(metadata) => {
+                let permissions = metadata.permissions();
+                RocResult::ok(permissions.mode() & 0o400 != 0)
+            }
+            Err(err) => {
+                RocResult::err(err.into())
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        RocResult::err(IOErr{
+            msg: "Not yet implemented on windows.".into(),
+            tag: IOErrTag::Unsupported,
+        })
+    }
+}
+
+pub fn file_is_writable(roc_path: &RocList<u8>) -> RocResult<bool, IOErr> {
+    let rust_path = path_from_roc_path(roc_path);
+
+    #[cfg(unix)]
+    {
+        let metadata_res = std::fs::metadata(rust_path);
+
+        match metadata_res {
+            Ok(metadata) => {
+                let permissions = metadata.permissions();
+                RocResult::ok(permissions.mode() & 0o200 != 0)
+            }
+            Err(err) => {
+                RocResult::err(err.into())
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        RocResult::err(IOErr{
+            msg: "Not yet implemented on windows.".into(),
+            tag: IOErrTag::Unsupported,
+        })
+    }
+}
+
+pub fn file_time_accessed(roc_path: &RocList<u8>) -> RocResult<roc_std::U128, IOErr> {
+    let rust_path = path_from_roc_path(roc_path);
+    let metadata_res = std::fs::metadata(rust_path);
+
+    match metadata_res {
+        Ok(metadata) => {
+            let accessed = metadata.accessed();
+            match accessed {
+                Ok(time) => {
+                    RocResult::ok(
+                        roc_std::U128::from(
+                            time.duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+                        )
+                    )
+                }
+                Err(err) => {
+                    RocResult::err(err.into())
+                }
+            }
+        }
+        Err(err) => {
+            RocResult::err(err.into())
+        }
+    }
+}
+
+pub fn file_time_modified(roc_path: &RocList<u8>) -> RocResult<roc_std::U128, IOErr> {
+    let rust_path = path_from_roc_path(roc_path);
+    let metadata_res = std::fs::metadata(rust_path);
+
+    match metadata_res {
+        Ok(metadata) => {
+            let modified = metadata.modified();
+            match modified {
+                Ok(time) => {
+                    RocResult::ok(
+                        roc_std::U128::from(
+                            time.duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+                        )
+                    )
+                }
+                Err(err) => {
+                    RocResult::err(err.into())
+                }
+            }
+        }
+        Err(err) => {
+            RocResult::err(err.into())
+        }
+    }
+}
+
+pub fn file_time_created(roc_path: &RocList<u8>) -> RocResult<roc_std::U128, IOErr> {
+    let rust_path = path_from_roc_path(roc_path);
+    let metadata_res = std::fs::metadata(rust_path);
+
+    match metadata_res {
+        Ok(metadata) => {
+            let created = metadata.created();
+            match created {
+                Ok(time) => {
+                    RocResult::ok(
+                        roc_std::U128::from(
+                            time.duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+                        )
+                    )
+                }
+                Err(err) => {
+                    RocResult::err(err.into())
+                }
+            }
+        }
+        Err(err) => {
+            RocResult::err(err.into())
+        }
+    }
+}
+
+pub fn file_exists(roc_path: &RocList<u8>) -> RocResult<bool, IOErr> {
+    let path = path_from_roc_path(roc_path);
+    match path.try_exists() {
+        Ok(exists) => RocResult::ok(exists),
+        Err(err) => RocResult::err(err.into()),
+    }
+}
+
+pub fn file_rename(from_path: &RocList<u8>, to_path: &RocList<u8>) -> RocResult<(), IOErr> {
+    let rust_from_path = path_from_roc_path(from_path);
+    let rust_to_path = path_from_roc_path(to_path);
+
+    match std::fs::rename(rust_from_path, rust_to_path) {
         Ok(()) => RocResult::ok(()),
         Err(err) => RocResult::err(err.into()),
     }

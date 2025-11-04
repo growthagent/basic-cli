@@ -69,7 +69,8 @@ all_tests_output.log
 
 platform/*.a
 
-ci/file-testBROKEN
+ci/check_all_exposed_funs_tested
+ci/check_cargo_versions_match
 
 # glue generated files
 crates/roc_std

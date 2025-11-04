@@ -12,6 +12,7 @@ members = [
     "crates/roc_io_error",
     "crates/roc_sqlite",
     "crates/roc_stdio",
+    "crates/roc_random",
 ]
 
 [workspace.package]
@@ -26,7 +27,7 @@ lto = true
 strip = "debuginfo"
 # You can comment this out if you hit a segmentation fault similar to the one in see issue github.com/roc-lang/roc/issues/6121
 # Setting this to 1 should improve execution speed by making things easier to optimize for LLVM.
-codegen-units = 1
+# codegen-units = 1
 
 [workspace.dependencies]
 roc_std = { git = "https://github.com/roc-lang/roc.git" }
@@ -39,26 +40,32 @@ roc_http = { path = "crates/roc_http" }
 roc_io_error = { path = "crates/roc_io_error" }
 roc_stdio = { path = "crates/roc_stdio" }
 roc_env = { path = "crates/roc_env" }
+roc_random = { path = "crates/roc_random" }
 roc_sqlite = { path = "crates/roc_sqlite" }
 memchr = "=2.7.4"
-hyper = { version = "=0.14.27", default-features = false, features = [
+hyper = { version = "=1.6.0", default-features = false, features = [
     "http1",
     "client",
 ] }
-hyper-rustls = { version = "=0.24.2", default-features = false, features = [
+hyper-util = "=0.1.12"
+hyper-rustls = { version = "=0.27.6", default-features = false, features = [
     "http1",
     "tls12",
     "native-tokio",
+    "rustls-native-certs", # required for with_native_roots
+    "ring", # required for with_native_roots
 ] }
-tokio = { version = "=1.31.0", default-features = false }
+http-body-util = "=0.1.3"
+tokio = { version = "=1.45.0", default-features = false }
 sys-locale = "=0.3.2"
-bytes = "=1.0"
-crossterm = "=0.27.0"
-memmap2 = "0.9.4"
-libc = "=0.2.155"
-backtrace = "=0.3.69"
-libsqlite3-sys = { version = "0.30.1", features = ["bundled"] }
-thread_local = "1.1.8"
+bytes = "=1.10.1"
+crossterm = "=0.29.0"
+memmap2 = "=0.9.4"
+libc = "=0.2.172"
+backtrace = "=0.3.75"
+libsqlite3-sys = { version = "=0.33.0", features = ["bundled"] }
+thread_local = "=1.1.8"
 aes-gcm = "0.10"
 pbkdf2 = "0.12"
 sha2 = "0.10"
+getrandom = { version = "0.3.3", features = [ "std" ] }

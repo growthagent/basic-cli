@@ -2,7 +2,6 @@
   description = "Basic cli devShell flake";
 
   inputs = {
-
     roc.url = "github:roc-lang/roc";
 
     nixpkgs.follows = "roc/nixpkgs";
@@ -31,6 +30,18 @@
         rust =
           pkgs.rust-bin.fromRustupToolchainFile "${toString ./rust-toolchain.toml}";
 
+        shellFunctions = ''
+          buildcmd() {
+            bash jump-start.sh && roc ./build.roc -- --roc roc
+          }
+          export -f buildcmd
+
+          testcmd() {
+            export EXAMPLES_DIR=./examples/ && ./ci/all_tests.sh
+          }
+          export -f testcmd
+        '';
+
         linuxInputs = with pkgs;
           lib.optionals stdenv.isLinux [
             valgrind
@@ -43,6 +54,7 @@
           ]);
 
         sharedInputs = (with pkgs; [
+          sqlite
           jq
           rust
           llvmPkgs.clang
@@ -51,6 +63,7 @@
           nmap
           simple-http-server
           rocPkgs.cli
+          ripgrep # for ci/check_all_exposed_funs_tested.roc
         ]);
       in {
 
@@ -64,6 +77,19 @@
           # for crti.o, crtn.o, and Scrt1.o
           NIX_GLIBC_PATH =
             if pkgs.stdenv.isLinux then "${pkgs.glibc.out}/lib" else "";
+
+          shellHook = ''
+            export ROC=roc
+
+            ${shellFunctions}
+            
+            echo "Some convenient commands:"
+            echo "${shellFunctions}" | grep -E '^\s*[a-zA-Z_][a-zA-Z0-9_]*\(\)' | sed 's/().*//' | sed 's/^[[:space:]]*/  /' | while read func; do
+              body=$(echo "${shellFunctions}" | sed -n "/''${func}()/,/^[[:space:]]*}/p" | sed '1d;$d' | tr '\n' ';' | sed 's/;$//' | sed 's/[[:space:]]*$//')
+              echo "  $func = $body"
+            done
+            echo ""
+          '';
         };
 
         formatter = pkgs.nixpkgs-fmt;

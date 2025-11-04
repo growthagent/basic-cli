@@ -4,6 +4,9 @@
 //! writing to stdio or making HTTP requests.
 
 use core::ffi::c_void;
+use bytes::Bytes;
+use http_body_util::BodyExt;
+use hyper_util::rt::TokioExecutor;
 use roc_env::arg::ArgToAndFromHost;
 use roc_io_error::IOErr;
 use roc_std::{RocBox, RocList, RocResult, RocStr};
@@ -54,6 +57,8 @@ pub unsafe extern "C" fn roc_dealloc(c_ptr: *mut c_void, _alignment: u32) {
         heap.dealloc(c_ptr);
         return;
     }
+    // !! If you make any changes to this function, you may also need to update roc_dealloc in
+    // https://github.com/roc-lang/basic-webserver
     let heap = roc_sqlite::heap();
     if heap.in_range(c_ptr) {
         heap.dealloc(c_ptr);
@@ -314,6 +319,16 @@ pub fn init() {
         roc_fx_file_reader as _,
         roc_fx_file_read_line as _,
         roc_fx_file_delete as _,
+        roc_fx_file_size_in_bytes as _,
+        roc_fx_file_is_executable as _,
+        roc_fx_file_is_readable as _,
+        roc_fx_file_is_writable as _,
+        roc_fx_file_time_accessed as _,
+        roc_fx_file_time_modified as _,
+        roc_fx_file_time_created as _,
+        roc_fx_file_exists as _,
+        roc_fx_file_rename as _,
+        roc_fx_hard_link as _,
         roc_fx_cwd as _,
         roc_fx_posix_time as _,
         roc_fx_sleep_millis as _,
@@ -324,8 +339,8 @@ pub fn init() {
         roc_fx_tcp_read_exactly as _,
         roc_fx_tcp_read_until as _,
         roc_fx_tcp_write as _,
-        roc_fx_command_status as _,
-        roc_fx_command_output as _,
+        roc_fx_command_exec_exit_code as _,
+        roc_fx_command_exec_output as _,
         roc_fx_dir_create as _,
         roc_fx_dir_create_all as _,
         roc_fx_dir_delete_empty as _,
@@ -334,6 +349,8 @@ pub fn init() {
         roc_fx_temp_dir as _,
         roc_fx_get_locale as _,
         roc_fx_get_locales as _,
+        roc_fx_random_u64 as _,
+        roc_fx_random_u32 as _,
         roc_fx_sqlite_bind as _,
         roc_fx_sqlite_column_value as _,
         roc_fx_sqlite_columns as _,
@@ -511,6 +528,68 @@ pub extern "C" fn roc_fx_file_delete(roc_path: &RocList<u8>) -> RocResult<(), ro
 }
 
 #[no_mangle]
+pub extern "C" fn roc_fx_file_size_in_bytes(
+    roc_path: &RocList<u8>,
+) -> RocResult<u64, roc_io_error::IOErr> {
+    roc_file::file_size_in_bytes(roc_path)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_file_is_executable(
+    roc_path: &RocList<u8>,
+) -> RocResult<bool, roc_io_error::IOErr> {
+    roc_file::file_is_executable(roc_path)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_file_is_readable(
+    roc_path: &RocList<u8>,
+) -> RocResult<bool, roc_io_error::IOErr> {
+    roc_file::file_is_readable(roc_path)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_file_is_writable(
+    roc_path: &RocList<u8>,
+) -> RocResult<bool, roc_io_error::IOErr> {
+    roc_file::file_is_writable(roc_path)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_file_time_accessed(
+    roc_path: &RocList<u8>,
+) -> RocResult<roc_std::U128, roc_io_error::IOErr> {
+    roc_file::file_time_accessed(roc_path)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_file_time_modified(
+    roc_path: &RocList<u8>,
+) -> RocResult<roc_std::U128, roc_io_error::IOErr> {
+    roc_file::file_time_modified(roc_path)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_file_time_created(
+    roc_path: &RocList<u8>,
+) -> RocResult<roc_std::U128, roc_io_error::IOErr> {
+    roc_file::file_time_created(roc_path)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_file_exists(roc_path: &RocList<u8>) -> RocResult<bool, roc_io_error::IOErr> {
+    roc_file::file_exists(roc_path)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_file_rename(
+    from_path: &RocList<u8>,
+    to_path: &RocList<u8>,
+) -> RocResult<(), roc_io_error::IOErr> {
+    roc_file::file_rename(from_path, to_path)
+}
+
+#[no_mangle]
 pub extern "C" fn roc_fx_cwd() -> RocResult<RocList<u8>, ()> {
     roc_env::cwd()
 }
@@ -561,20 +640,32 @@ pub extern "C" fn roc_fx_send_request(
     })
 }
 
-async fn async_send_request(request: hyper::Request<hyper::Body>) -> roc_http::ResponseToAndFromHost {
-    use hyper::Client;
+async fn async_send_request(request: hyper::Request<http_body_util::Full<Bytes>>) -> roc_http::ResponseToAndFromHost {
+    use hyper_util::client::legacy::Client;
     use hyper_rustls::HttpsConnectorBuilder;
 
-    let https = HttpsConnectorBuilder::new()
+    let https = match HttpsConnectorBuilder::new()
         .with_native_roots()
-        .https_or_http()
-        .enable_http1()
-        .build();
+    {
+        Ok(builder) => builder
+            .https_or_http()
+            .enable_http1()
+            .build(),
+        Err(_) => {
+            return roc_http::ResponseToAndFromHost {
+                status: 500,
+                headers: RocList::empty(),
+                body: "Failed to initialize HTTPS connector with native roots".as_bytes().into(),
+            };
+        }
+    };
 
-    let client: Client<_, hyper::Body> = Client::builder().build(https);
-    let res = client.request(request).await;
+    let client: Client<_, http_body_util::Full<Bytes>> =
+        Client::builder(TokioExecutor::new()).build(https);
 
-    match res {
+    let response_res = client.request(request).await;
+
+    match response_res {
         Ok(response) => {
             let status = response.status();
 
@@ -584,44 +675,37 @@ async fn async_send_request(request: hyper::Request<hyper::Body>) -> roc_http::R
 
             let status = status.as_u16();
 
-            let bytes = match hyper::body::to_bytes(response.into_body()).await {
-                Ok(bytes) => bytes,
+            let bytes_res =
+                response.into_body().collect().await.map(|collected| collected.to_bytes());
+
+            match bytes_res {
+                Ok(bytes) => {
+                    let body: RocList<u8> = RocList::from_iter(bytes);
+
+                    roc_http::ResponseToAndFromHost {
+                        body,
+                        status,
+                        headers,
+                    }
+                },
                 Err(_) => {
-                    return roc_http::ResponseToAndFromHost {
+                    roc_http::ResponseToAndFromHost {
                         status: 500,
                         headers: RocList::empty(),
                         body: roc_http::REQUEST_BAD_BODY.into(),
-                    };
+                    }
                 }
-            };
-
-            let body: RocList<u8> = RocList::from_iter(bytes);
-
-            roc_http::ResponseToAndFromHost {
-                body,
-                status,
-                headers,
             }
         }
         Err(err) => {
-            if err.is_timeout() {
-                roc_http::ResponseToAndFromHost {
-                    status: 408,
-                    headers: RocList::empty(),
-                    body: roc_http::REQUEST_TIMEOUT_BODY.into(),
-                }
-            } else if err.is_connect() || err.is_closed() {
-                roc_http::ResponseToAndFromHost {
-                    status: 500,
-                    headers: RocList::empty(),
-                    body: roc_http::REQUEST_NETWORK_ERR.into(),
-                }
-            } else {
-                roc_http::ResponseToAndFromHost {
-                    status: 500,
-                    headers: RocList::empty(),
-                    body: format!("OTHER ERROR\n{}", err).as_bytes().into(),
-                }
+            // TODO match on the error type to provide more specific responses with appropriate status codes
+            /*use std::error::Error;
+            let err_source_opt = err.source();*/
+
+            roc_http::ResponseToAndFromHost {
+                status: 500,
+                headers: RocList::empty(),
+                body: format!("ERROR:\n{}", err).as_bytes().into(),
             }
         }
     }
@@ -662,17 +746,17 @@ pub extern "C" fn roc_fx_tcp_write(stream: RocBox<()>, msg: &RocList<u8>) -> Roc
 }
 
 #[no_mangle]
-pub extern "C" fn roc_fx_command_status(
+pub extern "C" fn roc_fx_command_exec_exit_code(
     roc_cmd: &roc_command::Command,
 ) -> RocResult<i32, roc_io_error::IOErr> {
-    roc_command::command_status(roc_cmd)
+    roc_command::command_exec_exit_code(roc_cmd)
 }
 
 #[no_mangle]
-pub extern "C" fn roc_fx_command_output(
+pub extern "C" fn roc_fx_command_exec_output(
     roc_cmd: &roc_command::Command,
-) -> roc_command::OutputFromHost {
-    roc_command::command_output(roc_cmd)
+) -> RocResult<roc_command::OutputFromHostSuccess, RocResult<roc_command::OutputFromHostFailure, roc_io_error::IOErr>> {
+    roc_command::command_exec_output(roc_cmd)
 }
 
 #[no_mangle]
@@ -702,11 +786,11 @@ pub extern "C" fn roc_fx_dir_delete_all(
 }
 
 #[no_mangle]
-pub extern "C" fn roc_fx_hardLink(
-    path_from: &RocList<u8>,
-    path_to: &RocList<u8>,
+pub extern "C" fn roc_fx_hard_link(
+    path_original: &RocList<u8>,
+    path_link: &RocList<u8>,
 ) -> RocResult<(), roc_io_error::IOErr> {
-    roc_file::hard_link(path_from, path_to)
+    roc_file::hard_link(path_original, path_link)
 }
 
 #[no_mangle]
@@ -727,6 +811,16 @@ pub extern "C" fn roc_fx_get_locale() -> RocResult<RocStr, ()> {
 #[no_mangle]
 pub extern "C" fn roc_fx_get_locales() -> RocList<RocStr> {
     roc_env::get_locales()
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_random_u64() -> RocResult<u64, IOErr> {
+    roc_random::random_u64()
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_random_u32() -> RocResult<u32, IOErr> {
+    roc_random::random_u32()
 }
 
 #[no_mangle]

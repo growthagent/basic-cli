@@ -4,9 +4,11 @@
 set -exo pipefail
 
 if [ -z "${EXAMPLES_DIR}" ]; then
-  echo "ERROR: The EXAMPLES_DIR environment variable is not set." >&2
+    echo "ERROR: The EXAMPLES_DIR environment variable is not set." >&2
 
-  exit 1
+    exit 1
+else
+    EXAMPLES_DIR=$(realpath "${EXAMPLES_DIR}")/
 fi
 
 if [ -z "${ROC}" ]; then
@@ -18,6 +20,9 @@ if [ -z "${ROC}" ]; then
 
   exit 1
 fi
+
+TESTS_DIR="$(dirname "$EXAMPLES_DIR")/tests/"
+export TESTS_DIR
 
 if [ "$NO_BUILD" != "1" ]; then
   # May be needed for breaking roc changes. Also replace platform in build.roc with `cli: platform "platform/main.roc",`
@@ -31,6 +36,12 @@ fi
 for roc_file in $EXAMPLES_DIR*.roc; do
     $ROC check $roc_file
 done
+for roc_file in $TESTS_DIR*.roc; do
+    $ROC check $roc_file
+done
+
+$ROC ci/check_all_exposed_funs_tested.roc
+$ROC ci/check_cargo_versions_match.roc
 
 # roc build
 architecture=$(uname -m)
@@ -44,6 +55,18 @@ for roc_file in $EXAMPLES_DIR*.roc; do
         $ROC build $roc_file $ROC_BUILD_FLAGS
     fi
 
+done
+for roc_file in $TESTS_DIR*.roc; do
+    $ROC build $roc_file $ROC_BUILD_FLAGS
+done
+
+# Check for duplicate .roc file names between EXAMPLES_DIR and TESTS_DIR (this messes with checks)
+for example_file in $EXAMPLES_DIR*.roc; do
+    example_basename=$(basename "$example_file")
+    if [ -f "$TESTS_DIR$example_basename" ]; then
+        echo "ERROR: Duplicate file name found: $example_basename exists in both $EXAMPLES_DIR and $TESTS_DIR. Change the name of one of them." >&2
+        exit 1
+    fi
 done
 
 # prep for next step
@@ -60,6 +83,11 @@ for roc_file in $EXAMPLES_DIR*.roc; do
         continue
     fi
 
+    ## Skip file-accessed-modified-created-time.roc when IS_MUSL=1
+    if [ "$IS_MUSL" == "1" ] && [ "$base_file" == "file-accessed-modified-created-time.roc" ]; then
+        continue
+    fi
+
     roc_file_only="$(basename "$roc_file")"
     no_ext_name=${roc_file_only%.*}
 
@@ -70,18 +98,26 @@ for roc_file in $EXAMPLES_DIR*.roc; do
 
     expect ci/expect_scripts/$no_ext_name.exp
 done
+for roc_file in $TESTS_DIR*.roc; do
+
+    roc_file_only="$(basename "$roc_file")"
+    no_ext_name=${roc_file_only%.*}
+
+    expect ci/expect_scripts/$no_ext_name.exp
+done
 
 # remove Dir example directorys if they exist
 rm -rf dirExampleE
 rm -rf dirExampleA
 rm -rf dirExampleD
 
+# countdown, echo, form... all require user input or special setup
+ignore_list=("stdin-basic.roc" "stdin-pipe.roc" "command-line-args.roc" "http.roc" "env-var.roc" "bytes-stdin-stdout.roc" "error-handling.roc" "tcp-client.roc" "tcp.roc" "terminal-app-snake.roc")
+
 # roc dev (some expects only run with `roc dev`)
 for roc_file in $EXAMPLES_DIR*.roc; do
     base_file=$(basename "$roc_file")
 
-    # countdown, echo, form, piping... all require user input or special setup
-    ignore_list=("countdown.roc" "echo.roc" "form.roc" "piping.roc" "stdin.roc" "args.roc" "http-get-json.roc" "env-var.roc" "dup-bytes.roc")
 
     # check if base_file matches something from ignore_list
     for file in "${ignore_list[@]}"; do
@@ -96,12 +132,33 @@ for roc_file in $EXAMPLES_DIR*.roc; do
         cd $EXAMPLES_DIR
         $absolute_roc dev $base_file $ROC_BUILD_FLAGS
         cd ..
-    elif [ "$base_file" == "sqlite.roc" ]; then
+    elif [ "$base_file" == "sqlite-basic.roc" ]; then
         DB_PATH=${EXAMPLES_DIR}todos.db $ROC dev $roc_file $ROC_BUILD_FLAGS
+    elif [ "$base_file" == "sqlite-everything.roc" ]; then
+        DB_PATH=${EXAMPLES_DIR}todos2.db $ROC dev $roc_file $ROC_BUILD_FLAGS
     elif [ "$base_file" == "temp-dir.roc" ]; then
         $ROC dev $roc_file $ROC_BUILD_FLAGS --linker=legacy
+    elif [ "$base_file" == "file-accessed-modified-created-time.roc" ] && [ "$IS_MUSL" == "1" ]; then
+        continue
     else
 
+        $ROC dev $roc_file $ROC_BUILD_FLAGS
+    fi
+done
+
+for roc_file in $TESTS_DIR*.roc; do
+    base_file=$(basename "$roc_file")
+
+    # check if base_file matches something from ignore_list
+    for file in "${ignore_list[@]}"; do
+        if [ "$base_file" == "$file" ]; then
+            continue 2 # continue the outer loop if a match is found
+        fi
+    done
+
+    if [ "$base_file" == "sqlite.roc" ]; then
+        DB_PATH=${TESTS_DIR}test.db $ROC dev $roc_file $ROC_BUILD_FLAGS
+    else
         $ROC dev $roc_file $ROC_BUILD_FLAGS
     fi
 done

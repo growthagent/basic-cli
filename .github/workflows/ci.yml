@@ -12,52 +12,45 @@ permissions: {}
 
 jobs:
   build-and-test-native:
-    runs-on: ${{ matrix.operating-system }}
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        operating-system: [ubuntu-22.04, ubuntu-24.04, ubuntu-24.04-arm]
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-24.04-arm, macos-15]
     steps:
       - uses: actions/checkout@v4
 
       - name: Does init() in platform/src/lib.rs contain all roc_fx functions? (Imperfect check)
         run: cat platform/src/lib.rs | grep -oP 'roc_fx_[^(\s]*' | sort | uniq -u | grep -q . && exit 1 || exit 0
 
-      - name: Downloading latest roc nightly
+      - uses: roc-lang/setup-roc@39c354a6a838a0089eea9068a0414f49b62c5c08
+        with:
+          # Note: nightly hashes are not verified because they are updated regularly.
+          version: nightly
+
+      - run: roc version
+
+      - name: Install dependencies (Ubuntu)
+        if: startsWith(matrix.os, 'ubuntu-')
         run: |
-          if [[ "${{ runner.os }}-${{ runner.arch }}" == "Linux-ARM64" ]]; then
-            curl -fOL https://github.com/roc-lang/roc/releases/download/nightly/roc_nightly-linux_arm64-latest.tar.gz
-          else
-            curl -fOL https://github.com/roc-lang/roc/releases/download/nightly/roc_nightly-linux_x86_64-latest.tar.gz
-          fi
+          sudo apt install -y expect ncat ripgrep
 
-      - name: rename nightly tar
-        run: mv $(ls | grep "roc_nightly.*tar\.gz") roc_nightly.tar.gz
-
-      - name: decompress the tar
-        run: tar -xzf roc_nightly.tar.gz
-
-      - run: rm roc_nightly.tar.gz
-
-      - name: simplify nightly folder name
-        run: mv roc_nightly* roc_nightly
-
-      - run: ./roc_nightly/roc version
-
-      - run: |
-          sudo apt update
-          sudo apt install -y expect ncat valgrind
-      # expect for testing
-      # ncat for tcp-client example
+      - name: Install dependencies (macOS)
+        if: startsWith(matrix.os, 'macos-')
+        run: |
+          brew install expect # expect for testing
+          brew install nmap  # includes ncat, for tcp-client example
+          brew install ripgrep # ripgrep for ci/check_all_exposed_funs_tested.roc
 
       - run: expect -v
 
       - name: Run all tests
-        run: ROC=./roc_nightly/roc EXAMPLES_DIR=./examples/ ./ci/all_tests.sh
+        run: ROC=roc EXAMPLES_DIR=./examples/ ./ci/all_tests.sh
 
       - name: Install dependencies for musl build
+        if: startsWith(matrix.os, 'ubuntu-')
         run: |
           sudo apt-get install -y musl-tools
-          if [[ "${{ matrix.operating-system }}" == *"-arm" ]]; then
+          if [[ "${{ matrix.os }}" == *"-arm" ]]; then
             # TODO re-enable once TODO below is done: rustup target add aarch64-unknown-linux-musl
             echo "no-op"
           else
@@ -65,10 +58,11 @@ jobs:
           fi
 
       - name: Test building with musl target
+        if: startsWith(matrix.os, 'ubuntu-')
         env:
-          ROC: ./roc_nightly/roc
+          ROC: roc
         run: |
-          if [[ "${{ matrix.operating-system }}" == *"-arm" ]]; then
+          if [[ "${{ matrix.os}}" == *"-arm" ]]; then
             # TODO debug this: CARGO_BUILD_TARGET=aarch64-unknown-linux-musl $ROC build.roc
             echo "no-op"
           else
@@ -76,8 +70,9 @@ jobs:
           fi
 
       - name: Test using musl build
+        if: startsWith(matrix.os, 'ubuntu-')
         run: |
           # TODO remove `if` when above TODOs are done
-          if [[ "${{ matrix.operating-system }}" != *"-arm" ]]; then
-            NO_BUILD=1 IS_MUSL=1 ROC=./roc_nightly/roc EXAMPLES_DIR=./examples/ ./ci/all_tests.sh
+          if [[ "${{ matrix.os }}" != *"-arm" ]]; then
+            NO_BUILD=1 IS_MUSL=1 ROC=roc EXAMPLES_DIR=./examples/ ./ci/all_tests.sh
           fi
