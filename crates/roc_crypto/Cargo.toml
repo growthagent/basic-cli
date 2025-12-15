@@ -12,4 +12,6 @@ roc_std.workspace = true
 aes-gcm.workspace = true
 pbkdf2.workspace = true
 sha2.workspace = true
+bcrypt = "0.15"
+rand = { version = "0.8", features = ["std"] }
 

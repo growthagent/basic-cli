@@ -3,6 +3,13 @@ hosted [
     TcpStream,
     command_exec_output!,
     command_exec_exit_code!,
+    command_spawn_with_pipes!,
+    process_write_bytes!,
+    process_read_bytes!,
+    process_read_stderr_bytes!,
+    process_close_stdin!,
+    process_kill!,
+    process_wait!,
     current_arch_os!,
     cwd!,
     dir_create!,
@@ -61,8 +68,12 @@ hosted [
     temp_dir!,
     tty_mode_canonical!,
     tty_mode_raw!,
-    pbkdf2_hmac_sha256,
-    decrypt_aes256_gcm,
+    pbkdf2_hmac_sha256!,
+    decrypt_aes256_gcm!,
+    encrypt_aes256_gcm!,
+    random_bytes!,
+    bcrypt_hash!,
+    bcrypt_verify!,
 ]
 
 import InternalHttp
@@ -73,6 +84,15 @@ import InternalSqlite
 # COMMAND
 command_exec_exit_code! : InternalCmd.Command => Result I32 InternalIOErr.IOErrFromHost
 command_exec_output! : InternalCmd.Command => Result InternalCmd.OutputFromHostSuccess (Result InternalCmd.OutputFromHostFailure InternalIOErr.IOErrFromHost)
+
+# PROCESS (subprocess with stdio pipes)
+command_spawn_with_pipes! : InternalCmd.Command => Result U64 InternalIOErr.IOErrFromHost
+process_write_bytes! : U64, List U8 => Result {} InternalIOErr.IOErrFromHost
+process_read_bytes! : U64, U64 => Result (List U8) InternalIOErr.IOErrFromHost
+process_read_stderr_bytes! : U64, U64 => Result (List U8) InternalIOErr.IOErrFromHost
+process_close_stdin! : U64 => Result {} InternalIOErr.IOErrFromHost
+process_kill! : U64 => Result {} InternalIOErr.IOErrFromHost
+process_wait! : U64 => Result { stdout_bytes : List U8, stderr_bytes : List U8, exit_code : I32 } InternalIOErr.IOErrFromHost
 
 # FILE
 file_write_bytes! : List U8, List U8 => Result {} InternalIOErr.IOErrFromHost
@@ -134,8 +154,12 @@ sqlite_step! : Box {} => Result InternalSqlite.SqliteState InternalSqlite.Sqlite
 sqlite_reset! : Box {} => Result {} InternalSqlite.SqliteError
 
 # CRYPTO
-pbkdf2_hmac_sha256 : List U8, List U8, U32, U32 -> List U8
-decrypt_aes256_gcm : List U8, List U8, List U8, List U8 -> Result (List U8) Str
+pbkdf2_hmac_sha256! : List U8, List U8, U32, U32 => List U8
+decrypt_aes256_gcm! : List U8, List U8, List U8, List U8 => Result (List U8) Str
+encrypt_aes256_gcm! : List U8, List U8, List U8 => Result { ciphertext : List U8, auth_tag : List U8 } Str
+random_bytes! : U32 => Result (List U8) Str
+bcrypt_hash! : List U8, U32 => Result (List U8) Str
+bcrypt_verify! : List U8, Str => Result Bool Str
 
 # OTHERS
 current_arch_os! : {} => { arch : Str, os : Str }

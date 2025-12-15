@@ -1,5 +1,6 @@
 module [
     Cmd,
+    ChildProcess,
     new,
     arg,
     args,
@@ -11,6 +12,7 @@ module [
     exec!,
     exec_cmd!,
     exec_exit_code!,
+    spawn!,
 ]
 
 import InternalCmd exposing [to_str]
@@ -236,3 +238,73 @@ arg = |@Cmd(cmd), value|
 args : Cmd, List Str -> Cmd
 args = |@Cmd(cmd), values|
     @Cmd({ cmd & args: List.concat(cmd.args, values) })
+
+# === Interactive child process ===
+
+## A spawned child process with bound IO functions.
+##
+## Returned by [spawn!]. Each function is bound to this specific child process.
+##
+## **Important**: `read_stdout!` and `read_stderr!` block until *exactly* N bytes
+## are available. If the process outputs fewer bytes than requested, the call
+## will hang indefinitely. Use these when you know the exact message size
+## (e.g., length-prefixed protocols) or use `wait!` to read all output at once.
+##
+## Call `close_stdin!` to signal EOF to the child process. Many programs
+## (grep, cat, etc.) wait for stdin EOF before producing output.
+ChildProcess : {
+    write_stdin! : List U8 => Result {} [WriteFailed IOErr],
+    read_stdout! : U64 => Result (List U8) [ReadFailed IOErr],
+    read_stderr! : U64 => Result (List U8) [ReadFailed IOErr],
+    close_stdin! : {} => Result {} [CloseFailed IOErr],
+    kill! : {} => Result {} [KillFailed IOErr],
+    wait! : {} => Result { exit_code : I32, stdout : List U8, stderr : List U8 } [WaitFailed IOErr],
+}
+
+## Spawn a child process with stdio pipes for bidirectional communication.
+##
+## Returns a record of functions bound to the spawned process.
+##
+## ```
+## { write_stdin!, read_stdout!, read_stderr!, kill!, wait! } =
+##     Cmd.new("node")
+##     |> Cmd.arg("repl.js")
+##     |> Cmd.spawn!()?
+##
+## write_stdin!("1+1\n" |> Str.to_utf8)?
+## response = read_stdout!(100)?
+## kill!({})?
+## ```
+##
+## > Remember to call `kill!` or `wait!` when done to clean up resources.
+spawn! : Cmd => Result ChildProcess [SpawnFailed IOErr]
+spawn! = |@Cmd(cmd)|
+    id = Host.command_spawn_with_pipes!(cmd)
+        |> Result.map_err(|err| SpawnFailed(InternalIOErr.handle_err(err)))?
+
+    Ok({
+        write_stdin!: |bytes|
+            Host.process_write_bytes!(id, bytes)
+            |> Result.map_err(|err| WriteFailed(InternalIOErr.handle_err(err))),
+
+        read_stdout!: |num_bytes|
+            Host.process_read_bytes!(id, num_bytes)
+            |> Result.map_err(|err| ReadFailed(InternalIOErr.handle_err(err))),
+
+        read_stderr!: |num_bytes|
+            Host.process_read_stderr_bytes!(id, num_bytes)
+            |> Result.map_err(|err| ReadFailed(InternalIOErr.handle_err(err))),
+
+        close_stdin!: |{}|
+            Host.process_close_stdin!(id)
+            |> Result.map_err(|err| CloseFailed(InternalIOErr.handle_err(err))),
+
+        kill!: |{}|
+            Host.process_kill!(id)
+            |> Result.map_err(|err| KillFailed(InternalIOErr.handle_err(err))),
+
+        wait!: |{}|
+            Host.process_wait!(id)
+            |> Result.map_ok(|{ stdout_bytes, stderr_bytes, exit_code }| { exit_code, stdout: stdout_bytes, stderr: stderr_bytes })
+            |> Result.map_err(|err| WaitFailed(InternalIOErr.handle_err(err))),
+    })

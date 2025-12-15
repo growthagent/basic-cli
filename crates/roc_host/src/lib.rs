@@ -341,6 +341,13 @@ pub fn init() {
         roc_fx_tcp_write as _,
         roc_fx_command_exec_exit_code as _,
         roc_fx_command_exec_output as _,
+        roc_fx_command_spawn_with_pipes as _,
+        roc_fx_process_write_bytes as _,
+        roc_fx_process_read_bytes as _,
+        roc_fx_process_read_stderr_bytes as _,
+        roc_fx_process_close_stdin as _,
+        roc_fx_process_kill as _,
+        roc_fx_process_wait as _,
         roc_fx_dir_create as _,
         roc_fx_dir_create_all as _,
         roc_fx_dir_delete_empty as _,
@@ -359,6 +366,10 @@ pub fn init() {
         roc_fx_sqlite_step as _,
         roc_fx_decrypt_aes256_gcm as _,
         roc_fx_pbkdf2_hmac_sha256 as _,
+        roc_fx_encrypt_aes256_gcm as _,
+        roc_fx_random_bytes as _,
+        roc_fx_bcrypt_hash as _,
+        roc_fx_bcrypt_verify as _,
     ];
     #[allow(forgetting_references)]
     std::mem::forget(std::hint::black_box(funcs));
@@ -760,6 +771,58 @@ pub extern "C" fn roc_fx_command_exec_output(
 }
 
 #[no_mangle]
+pub extern "C" fn roc_fx_command_spawn_with_pipes(
+    roc_cmd: &roc_command::Command,
+) -> RocResult<u64, roc_io_error::IOErr> {
+    roc_command::command_spawn_with_pipes(roc_cmd)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_process_write_bytes(
+    process_id: u64,
+    bytes: &RocList<u8>,
+) -> RocResult<(), roc_io_error::IOErr> {
+    roc_command::process_write_bytes(process_id, bytes)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_process_read_bytes(
+    process_id: u64,
+    num_bytes: u64,
+) -> RocResult<RocList<u8>, roc_io_error::IOErr> {
+    roc_command::process_read_bytes(process_id, num_bytes)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_process_read_stderr_bytes(
+    process_id: u64,
+    num_bytes: u64,
+) -> RocResult<RocList<u8>, roc_io_error::IOErr> {
+    roc_command::process_read_stderr_bytes(process_id, num_bytes)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_process_close_stdin(
+    process_id: u64,
+) -> RocResult<(), roc_io_error::IOErr> {
+    roc_command::process_close_stdin(process_id)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_process_kill(
+    process_id: u64,
+) -> RocResult<(), roc_io_error::IOErr> {
+    roc_command::process_kill(process_id)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_process_wait(
+    process_id: u64,
+) -> RocResult<roc_command::ProcessOutput, roc_io_error::IOErr> {
+    roc_command::process_wait(process_id)
+}
+
+#[no_mangle]
 pub extern "C" fn roc_fx_dir_create(roc_path: &RocList<u8>) -> RocResult<(), roc_io_error::IOErr> {
     roc_file::dir_create(roc_path)
 }
@@ -874,5 +937,25 @@ pub extern "C" fn roc_fx_decrypt_aes256_gcm(ciphertext: &RocList<u8>, key: &RocL
 #[no_mangle]
 pub extern "C" fn roc_fx_pbkdf2_hmac_sha256(password: &RocList<u8>, salt: &RocList<u8>, iterations: u32, key_length: u32) -> RocList<u8> {
     roc_crypto::pbkdf2_hmac_sha256(password, salt, iterations, key_length)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_encrypt_aes256_gcm(plaintext: &RocList<u8>, key: &RocList<u8>, nonce: &RocList<u8>) -> RocResult<roc_crypto::AesGcmEncryptResult, RocStr> {
+    roc_crypto::encrypt_aes256_gcm(plaintext, key, nonce)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_random_bytes(length: u32) -> RocResult<RocList<u8>, RocStr> {
+    roc_crypto::random_bytes(length)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_bcrypt_hash(password: &RocList<u8>, cost: u32) -> RocResult<RocList<u8>, RocStr> {
+    roc_crypto::bcrypt_hash(password, cost)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_bcrypt_verify(password: &RocList<u8>, hash: &RocStr) -> RocResult<bool, RocStr> {
+    roc_crypto::bcrypt_verify(password, hash)
 }
 

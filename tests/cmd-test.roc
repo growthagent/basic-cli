@@ -98,6 +98,165 @@ main! = |_args|
             """
         ))?
 
+    # spawn! basic test
+    cat = Cmd.new("cat") |> Cmd.spawn!()?
+    cat.write_stdin!([72, 101, 108, 108, 111])?
+    output = cat.read_stdout!(5)?
+    if output != [72, 101, 108, 108, 111] then
+        Err(FailedExpectation(
+            """
+            spawn read_stdout!:
+            - Expected: [72, 101, 108, 108, 111]
+            - Got: ${Inspect.to_str(output)}
+            """
+        ))?
+    else
+        {}
+    cat.kill!({})?
+
+    # close_stdin! test with read_stdout! - cat waits for EOF, then "done" is echoed
+    # This REQUIRES close_stdin! to send EOF, otherwise cat blocks forever
+    eof_proc = Cmd.new("sh") |> Cmd.args(["-c", "cat; echo done"]) |> Cmd.spawn!()?
+    eof_proc.write_stdin!(Str.to_utf8("hi"))?
+    eof_proc.close_stdin!({})?
+    eof_out = eof_proc.read_stdout!(7)?  # "hi" + "done\n" = 7 bytes
+    if eof_out != Str.to_utf8("hidone\n") then
+        Err(FailedExpectation(
+            """
+            close_stdin! EOF test:
+            - Expected: ${Inspect.to_str(Str.to_utf8("hidone\n"))}
+            - Got: ${Inspect.to_str(eof_out)}
+            """
+        ))?
+    else
+        {}
+    eof_proc.kill!({})?
+
+    # wait! test
+    wait_cat = Cmd.new("cat") |> Cmd.spawn!()?
+    wait_cat.write_stdin!(Str.to_utf8("hello"))?
+    wait_cat.close_stdin!({})?
+    wait_res = wait_cat.wait!({})?
+    if wait_res.exit_code != 0 then
+        Err(FailedExpectation(
+            """
+            wait! exit_code:
+            - Expected: 0
+            - Got: ${Inspect.to_str(wait_res.exit_code)}
+            """
+        ))?
+    else
+        {}
+    if wait_res.stdout != Str.to_utf8("hello") then
+        Err(FailedExpectation(
+            """
+            wait! stdout:
+            - Expected: ${Inspect.to_str(Str.to_utf8("hello"))}
+            - Got: ${Inspect.to_str(wait_res.stdout)}
+            """
+        ))?
+    else
+        {}
+
+    # wait! with non-zero exit
+    exit42 = Cmd.new("sh") |> Cmd.args(["-c", "exit 42"]) |> Cmd.spawn!()?
+    exit42_res = exit42.wait!({})?
+    if exit42_res.exit_code != 42 then
+        Err(FailedExpectation(
+            """
+            wait! non-zero exit:
+            - Expected: 42
+            - Got: ${Inspect.to_str(exit42_res.exit_code)}
+            """
+        ))?
+    else
+        {}
+
+    # read_stderr! test
+    stderr_proc = Cmd.new("sh") |> Cmd.args(["-c", "echo err >&2"]) |> Cmd.spawn!()?
+    stderr_proc.close_stdin!({})?
+    stderr_out = stderr_proc.read_stderr!(4)?
+    if stderr_out != Str.to_utf8("err\n") then
+        Err(FailedExpectation(
+            """
+            read_stderr!:
+            - Expected: ${Inspect.to_str(Str.to_utf8("err\n"))}
+            - Got: ${Inspect.to_str(stderr_out)}
+            """
+        ))?
+    else
+        {}
+    stderr_proc.kill!({})?
+
+    # kill! test - verify process is removed after kill
+    sleeper = Cmd.new("sleep") |> Cmd.args(["60"]) |> Cmd.spawn!()?
+    sleeper.kill!({})?
+    # Second kill should fail - process already removed
+    when sleeper.kill!({}) is
+        Err(KillFailed(_)) -> {}
+        other -> Err(FailedExpectation(
+            """
+            second kill! should fail:
+            - Expected: Err(KillFailed(_))
+            - Got: ${Inspect.to_str(other)}
+            """
+        ))?
+
+    # spawn! non-existent
+    spawn_result = Cmd.new("nonexistent_xyz") |> Cmd.spawn!()
+    when spawn_result is
+        Err(SpawnFailed(_)) -> {}
+        Ok(_) -> Err(FailedExpectation(
+            """
+            spawn! non-existent command:
+            - Expected: Err(SpawnFailed(_))
+            - Got: Ok(ChildProcess)
+            """
+        ))?
+        Err(_) -> Err(FailedExpectation(
+            """
+            spawn! non-existent command:
+            - Expected: Err(SpawnFailed(_))
+            - Got: Err (other variant)
+            """
+        ))?
+
+    # write after close
+    closed = Cmd.new("cat") |> Cmd.spawn!()?
+    closed.close_stdin!({})?
+    when closed.write_stdin!([65]) is
+        Err(WriteFailed(_)) -> {}
+        other -> Err(FailedExpectation(
+            """
+            write after close_stdin!:
+            - Expected: Err(WriteFailed(_))
+            - Got: ${Inspect.to_str(other)}
+            """
+        ))?
+    closed.kill!({})?
+
+    # operations after kill
+    killed = Cmd.new("cat") |> Cmd.spawn!()?
+    killed.kill!({})?
+    when killed.write_stdin!([65]) is
+        Err(WriteFailed(_)) -> {}
+        other -> Err(FailedExpectation(
+            """
+            write after kill!:
+            - Expected: Err(WriteFailed(_))
+            - Got: ${Inspect.to_str(other)}
+            """
+        ))?
+    when killed.read_stdout!(1) is
+        Err(ReadFailed(_)) -> {}
+        other -> Err(FailedExpectation(
+            """
+            read after kill!:
+            - Expected: Err(ReadFailed(_))
+            - Got: ${Inspect.to_str(other)}
+            """
+        ))?
+
     Stdout.line!("All tests passed.")?
 
     Ok({})
