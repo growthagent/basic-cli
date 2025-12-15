@@ -1,27 +1,38 @@
-name: Bundle
+name: Bundle Platform
 
 on:
-  # Run when a release is published
   release:
     types:
       - published
 
 jobs:
   bundle:
-    name: Bundle
+    name: Bundle Platform
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+
       - name: Install Roc
         uses: hasnep/setup-roc@main
         with:
           roc-version: nightly
-      - name: Bundle and release the library
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build platform host
+        run: bash jump-start.sh
+
+      - name: Verify host files exist
+        run: |
+          ls -la platform/linux-x64.rh
+          ls -la platform/metadata_linux-x64.rm
+
+      - name: Bundle and release the platform
         uses: hasnep/bundle-roc-library@v0.1.0
         with:
           library: platform/main.roc
           token: ${{ github.token }}
-
