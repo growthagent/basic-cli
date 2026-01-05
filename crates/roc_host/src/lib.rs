@@ -348,6 +348,7 @@ pub fn init() {
         roc_fx_process_close_stdin as _,
         roc_fx_process_kill as _,
         roc_fx_process_wait as _,
+        roc_fx_process_poll as _,
         roc_fx_dir_create as _,
         roc_fx_dir_create_all as _,
         roc_fx_dir_delete_empty as _,
@@ -820,6 +821,13 @@ pub extern "C" fn roc_fx_process_wait(
     process_id: u64,
 ) -> RocResult<roc_command::ProcessOutput, roc_io_error::IOErr> {
     roc_command::process_wait(process_id)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_process_poll(
+    process_id: u64,
+) -> RocResult<roc_command::PollResult, roc_io_error::IOErr> {
+    roc_command::process_poll(process_id)
 }
 
 #[no_mangle]

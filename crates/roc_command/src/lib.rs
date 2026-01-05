@@ -1,6 +1,6 @@
 //! This crate provides common functionality for Roc to interface with `std::process::Command`
 
-use roc_std::{RocList, RocResult, RocStr};
+use roc_std::{roc_refcounted_noop_impl, RocList, RocRefcounted, RocResult, RocStr};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
@@ -195,6 +195,7 @@ pub fn command_spawn_with_pipes(roc_cmd: &Command) -> RocResult<u64, roc_io_erro
                 id
             };
 
+
             {
                 let mut processes = PROCESSES.lock().unwrap();
                 processes.insert(process_id, SpawnedProcess { child, stdin, stdout, stderr });
@@ -376,6 +377,173 @@ pub fn process_wait(process_id: u64) -> RocResult<ProcessOutput, roc_io_error::I
                         stderr_bytes: RocList::from(&stderr_bytes[..]),
                         exit_code,
                     })
+                }
+                Err(err) => RocResult::err(err.into()),
+            }
+        }
+        None => RocResult::err(roc_io_error::IOErr {
+            tag: roc_io_error::IOErrTag::NotFound,
+            msg: "Process not found".into(),
+        }),
+    }
+}
+
+// === PollResult: Tag union [Exited { exit_code: I32, stderr: List U8, stdout: List U8 }, Running] ===
+// Discriminants assigned alphabetically: Exited=0, Running=1
+
+/// Discriminant for PollResult tag union.
+/// Roc assigns discriminants alphabetically: Exited=0, Running=1
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Eq, Ord, Hash)]
+#[repr(u8)]
+pub enum PollResultDiscriminant {
+    Exited = 0,
+    Running = 1,
+}
+
+roc_std::roc_refcounted_noop_impl!(PollResultDiscriminant);
+
+/// Payload for the Exited variant.
+/// Fields are ordered by size (largest first), then alphabetically:
+/// - stderr_bytes: 24 bytes (List)
+/// - stdout_bytes: 24 bytes (List)
+/// - exit_code: 4 bytes (I32) + 4 padding
+#[derive(Clone, Debug)]
+#[repr(C)]
+pub struct PollResultExited {
+    pub stderr_bytes: roc_std::RocList<u8>,
+    pub stdout_bytes: roc_std::RocList<u8>,
+    pub exit_code: i32,
+}
+
+/// Union of all PollResult payloads.
+/// Exited has a record payload, Running has no payload (unit).
+#[repr(C, align(8))]
+pub union PollResultPayload {
+    pub Exited: core::mem::ManuallyDrop<PollResultExited>,
+    pub Running: (),
+}
+
+/// Tag union: [Exited { exit_code: I32, stderr: List U8, stdout: List U8 }, Running]
+#[repr(C)]
+pub struct PollResult {
+    pub payload: PollResultPayload,
+    pub discriminant: PollResultDiscriminant,
+}
+
+impl PollResult {
+    pub fn Exited(exit_code: i32, stdout_bytes: RocList<u8>, stderr_bytes: RocList<u8>) -> Self {
+        Self {
+            discriminant: PollResultDiscriminant::Exited,
+            payload: PollResultPayload {
+                Exited: core::mem::ManuallyDrop::new(PollResultExited {
+                    stderr_bytes,
+                    stdout_bytes,
+                    exit_code,
+                }),
+            },
+        }
+    }
+
+    pub fn Running() -> Self {
+        Self {
+            discriminant: PollResultDiscriminant::Running,
+            payload: PollResultPayload { Running: () },
+        }
+    }
+}
+
+impl Drop for PollResult {
+    fn drop(&mut self) {
+        match self.discriminant {
+            PollResultDiscriminant::Exited => unsafe {
+                core::mem::ManuallyDrop::drop(&mut self.payload.Exited)
+            },
+            PollResultDiscriminant::Running => {}
+        }
+    }
+}
+
+impl roc_std::RocRefcounted for PollResult {
+    fn inc(&mut self) {
+        match self.discriminant {
+            PollResultDiscriminant::Exited => unsafe {
+                (*self.payload.Exited).stderr_bytes.inc();
+                (*self.payload.Exited).stdout_bytes.inc();
+            },
+            PollResultDiscriminant::Running => {}
+        }
+    }
+    fn dec(&mut self) {
+        match self.discriminant {
+            PollResultDiscriminant::Exited => unsafe {
+                (*self.payload.Exited).stderr_bytes.dec();
+                (*self.payload.Exited).stdout_bytes.dec();
+            },
+            PollResultDiscriminant::Running => {}
+        }
+    }
+    fn is_refcounted() -> bool {
+        true
+    }
+}
+
+// Compile-time size assertions for FFI compatibility
+const _: () = {
+    assert!(core::mem::size_of::<PollResultExited>() == 56);
+    assert!(core::mem::size_of::<PollResultPayload>() == 56);
+    assert!(core::mem::size_of::<PollResult>() == 64);
+    assert!(core::mem::align_of::<PollResult>() == 8);
+
+    // Verify field offsets in PollResultExited
+    assert!(core::mem::offset_of!(PollResultExited, stderr_bytes) == 0);
+    assert!(core::mem::offset_of!(PollResultExited, stdout_bytes) == 24);
+    assert!(core::mem::offset_of!(PollResultExited, exit_code) == 48);
+
+    // Verify PollResult layout: payload at 0, discriminant at 56
+    assert!(core::mem::offset_of!(PollResult, payload) == 0);
+    assert!(core::mem::offset_of!(PollResult, discriminant) == 56);
+};
+
+/// Check if a spawned process has exited without blocking.
+/// Returns `Running` if the process is still running, or `Exited { ... }` with
+/// the exit code and output if the process has finished.
+///
+/// When returning `Exited`, the process is removed from the map and subsequent
+/// calls will return `NotFound`. The stdout/stderr are read in full.
+///
+/// Note: Read errors on stdout/stderr are silently ignored (returns empty bytes).
+/// This matches `process_wait` behavior and is safe because read errors on pipes
+/// from exited processes are extremely rare (data is kernel-buffered).
+pub fn process_poll(process_id: u64) -> RocResult<PollResult, roc_io_error::IOErr> {
+    let mut processes = PROCESSES.lock().unwrap();
+
+    match processes.get_mut(&process_id) {
+        Some(process) => {
+            match process.child.try_wait() {
+                Ok(Some(status)) => {
+                    // Process has exited - remove it from the map and collect output
+                    let mut process = processes.remove(&process_id).unwrap();
+
+                    let mut stdout_bytes = Vec::new();
+                    let mut stderr_bytes = Vec::new();
+
+                    if let Some(mut stdout) = process.stdout.take() {
+                        let _ = stdout.read_to_end(&mut stdout_bytes);
+                    }
+                    if let Some(mut stderr) = process.stderr.take() {
+                        let _ = stderr.read_to_end(&mut stderr_bytes);
+                    }
+
+                    let exit_code = status.code().unwrap_or(-1);
+                    RocResult::ok(PollResult::Exited(
+                        exit_code,
+                        RocList::from(&stdout_bytes[..]),
+                        RocList::from(&stderr_bytes[..]),
+                    ))
+                }
+                Ok(None) => {
+                    // Process is still running
+                    RocResult::ok(PollResult::Running())
                 }
                 Err(err) => RocResult::err(err.into()),
             }

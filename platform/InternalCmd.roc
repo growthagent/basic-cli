@@ -2,6 +2,7 @@ module [
     Command,
     OutputFromHostSuccess,
     OutputFromHostFailure,
+    PollResult,
     to_str,
 ]
 
@@ -24,6 +25,13 @@ OutputFromHostFailure : {
     stdout_bytes : List U8,
     exit_code : I32,
 }
+
+# Tag union for poll! result. Do not change the field order!
+# Discriminants are assigned alphabetically: Exited=0, Running=1
+PollResult : [
+    Exited { stderr_bytes : List U8, stdout_bytes : List U8, exit_code : I32 },
+    Running,
+]
 
 to_str : Command -> Str
 to_str = |cmd|

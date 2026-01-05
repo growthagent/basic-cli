@@ -10,6 +10,7 @@ hosted [
     process_close_stdin!,
     process_kill!,
     process_wait!,
+    process_poll!,
     current_arch_os!,
     cwd!,
     dir_create!,
@@ -93,6 +94,7 @@ process_read_stderr_bytes! : U64, U64 => Result (List U8) InternalIOErr.IOErrFro
 process_close_stdin! : U64 => Result {} InternalIOErr.IOErrFromHost
 process_kill! : U64 => Result {} InternalIOErr.IOErrFromHost
 process_wait! : U64 => Result { stdout_bytes : List U8, stderr_bytes : List U8, exit_code : I32 } InternalIOErr.IOErrFromHost
+process_poll! : U64 => Result InternalCmd.PollResult InternalIOErr.IOErrFromHost
 
 # FILE
 file_write_bytes! : List U8, List U8 => Result {} InternalIOErr.IOErrFromHost

@@ -3,6 +3,7 @@ app [main!] { pf: platform "../platform/main.roc" }
 import pf.Stdout
 import pf.Cmd
 import pf.Arg exposing [Arg]
+import pf.Sleep
 
 # Tests all error cases in Cmd functions.
 
@@ -257,6 +258,93 @@ main! = |_args|
             """
         ))?
 
+    # poll! returns Running for running process
+    sleeper2 = Cmd.new("sleep") |> Cmd.args(["60"]) |> Cmd.spawn!()?
+    poll_res1 = sleeper2.poll!({})?
+    when poll_res1 is
+        Running -> {}
+        Exited(_) ->
+            Err(FailedExpectation(
+                """
+                poll! running process:
+                - Expected: Running
+                - Got: Exited
+                """
+            ))?
+    sleeper2.kill!({})?
+
+    # poll! multiple times while running - all should return Running
+    sleeper3 = Cmd.new("sleep") |> Cmd.args(["60"]) |> Cmd.spawn!()?
+    poll_a = sleeper3.poll!({})?
+    poll_b = sleeper3.poll!({})?
+    poll_c = sleeper3.poll!({})?
+    all_running =
+        when (poll_a, poll_b, poll_c) is
+            (Running, Running, Running) -> Bool.true
+            _ -> Bool.false
+    if !all_running then
+        Err(FailedExpectation(
+            """
+            poll! multiple times while running:
+            - Expected: all Running
+            - Got: ${Inspect.to_str([poll_a, poll_b, poll_c])}
+            """
+        ))?
+    else
+        {}
+    sleeper3.kill!({})?
+
+    # poll! returns correct stdout when process exits
+    poll_cat = Cmd.new("sh") |> Cmd.args(["-c", "echo hello"]) |> Cmd.spawn!()?
+    poll_cat_loop!(poll_cat, 100)?
+
+    # poll! returns correct stderr when process exits
+    poll_stderr = Cmd.new("sh") |> Cmd.args(["-c", "echo err >&2"]) |> Cmd.spawn!()?
+    poll_stderr_loop!(poll_stderr, 100)?
+
+    # poll! returns correct non-zero exit code
+    poll_exit42 = Cmd.new("sh") |> Cmd.args(["-c", "exit 42"]) |> Cmd.spawn!()?
+    poll_exit42_loop!(poll_exit42, 100)?
+
+    # poll! after kill returns NotFound
+    sleeper4 = Cmd.new("sleep") |> Cmd.args(["60"]) |> Cmd.spawn!()?
+    sleeper4.kill!({})?
+    when sleeper4.poll!({}) is
+        Err(PollFailed(_)) -> {}
+        other -> Err(FailedExpectation(
+            """
+            poll! after kill!:
+            - Expected: Err(PollFailed(_))
+            - Got: ${Inspect.to_str(other)}
+            """
+        ))?
+
+    # poll! after wait! returns NotFound
+    wait_first = Cmd.new("sh") |> Cmd.args(["-c", "exit 0"]) |> Cmd.spawn!()?
+    _ = wait_first.wait!({})?
+    when wait_first.poll!({}) is
+        Err(PollFailed(_)) -> {}
+        other -> Err(FailedExpectation(
+            """
+            poll! after wait!:
+            - Expected: Err(PollFailed(_))
+            - Got: ${Inspect.to_str(other)}
+            """
+        ))?
+
+    # poll! second time after exited returns NotFound
+    poll_once = Cmd.new("sh") |> Cmd.args(["-c", "exit 0"]) |> Cmd.spawn!()?
+    poll_once_loop!(poll_once, 100)?
+    when poll_once.poll!({}) is
+        Err(PollFailed(_)) -> {}
+        other -> Err(FailedExpectation(
+            """
+            poll! second time after exited:
+            - Expected: Err(PollFailed(_))
+            - Got: ${Inspect.to_str(other)}
+            """
+        ))?
+
     Stdout.line!("All tests passed.")?
 
     Ok({})
@@ -276,3 +364,104 @@ expect_err = |err, expected_str|
 
             """
         ))
+
+## Poll until process exits, verify output matches "hello\n", with max attempts
+poll_cat_loop! = |proc, attempts_left|
+    if attempts_left == 0 then
+        Err(FailedExpectation("poll_cat_loop!: timed out waiting for process"))
+    else
+        poll_res = proc.poll!({})?
+        when poll_res is
+            Exited({ exit_code, stdout, stderr: _ }) ->
+                # Verify the output
+                expected_stdout = Str.to_utf8("hello\n")
+                if stdout != expected_stdout then
+                    Err(FailedExpectation(
+                        """
+                        poll! output:
+                        - Expected stdout: ${Inspect.to_str(expected_stdout)}
+                        - Got: ${Inspect.to_str(stdout)}
+                        """
+                    ))
+                else if exit_code != 0 then
+                    Err(FailedExpectation(
+                        """
+                        poll! exit_code:
+                        - Expected: 0
+                        - Got: ${Inspect.to_str(exit_code)}
+                        """
+                    ))
+                else
+                    Ok({})
+
+            Running ->
+                # Not done yet, sleep and try again
+                Sleep.millis!(10)
+                poll_cat_loop!(proc, attempts_left - 1)
+
+## Poll until process exits (don't check output), with max attempts
+poll_once_loop! = |proc, attempts_left|
+    if attempts_left == 0 then
+        Err(FailedExpectation("poll_once_loop!: timed out waiting for process"))
+    else
+        poll_res = proc.poll!({})?
+        when poll_res is
+            Exited(_) -> Ok({})
+            Running ->
+                Sleep.millis!(10)
+                poll_once_loop!(proc, attempts_left - 1)
+
+## Poll until process exits, verify stderr matches "err\n"
+poll_stderr_loop! = |proc, attempts_left|
+    if attempts_left == 0 then
+        Err(FailedExpectation("poll_stderr_loop!: timed out waiting for process"))
+    else
+        poll_res = proc.poll!({})?
+        when poll_res is
+            Exited({ exit_code, stdout: _, stderr }) ->
+                expected_stderr = Str.to_utf8("err\n")
+                if stderr != expected_stderr then
+                    Err(FailedExpectation(
+                        """
+                        poll! stderr:
+                        - Expected: ${Inspect.to_str(expected_stderr)}
+                        - Got: ${Inspect.to_str(stderr)}
+                        """
+                    ))
+                else if exit_code != 0 then
+                    Err(FailedExpectation(
+                        """
+                        poll! stderr exit_code:
+                        - Expected: 0
+                        - Got: ${Inspect.to_str(exit_code)}
+                        """
+                    ))
+                else
+                    Ok({})
+
+            Running ->
+                Sleep.millis!(10)
+                poll_stderr_loop!(proc, attempts_left - 1)
+
+## Poll until process exits, verify exit_code is 42
+poll_exit42_loop! = |proc, attempts_left|
+    if attempts_left == 0 then
+        Err(FailedExpectation("poll_exit42_loop!: timed out waiting for process"))
+    else
+        poll_res = proc.poll!({})?
+        when poll_res is
+            Exited({ exit_code, stdout: _, stderr: _ }) ->
+                if exit_code != 42 then
+                    Err(FailedExpectation(
+                        """
+                        poll! exit_code:
+                        - Expected: 42
+                        - Got: ${Inspect.to_str(exit_code)}
+                        """
+                    ))
+                else
+                    Ok({})
+
+            Running ->
+                Sleep.millis!(10)
+                poll_exit42_loop!(proc, attempts_left - 1)

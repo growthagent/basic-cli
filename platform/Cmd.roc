@@ -252,6 +252,11 @@ args = |@Cmd(cmd), values|
 ##
 ## Call `close_stdin!` to signal EOF to the child process. Many programs
 ## (grep, cat, etc.) wait for stdin EOF before producing output.
+##
+## Use `poll!` to check if a process has exited without blocking:
+## - Returns `Running` if the process is still executing
+## - Returns `Exited { exit_code, stdout, stderr }` when the process has finished
+## - After returning `Exited`, the process is cleaned up; subsequent calls return an error
 ChildProcess : {
     write_stdin! : List U8 => Result {} [WriteFailed IOErr],
     read_stdout! : U64 => Result (List U8) [ReadFailed IOErr],
@@ -259,6 +264,7 @@ ChildProcess : {
     close_stdin! : {} => Result {} [CloseFailed IOErr],
     kill! : {} => Result {} [KillFailed IOErr],
     wait! : {} => Result { exit_code : I32, stdout : List U8, stderr : List U8 } [WaitFailed IOErr],
+    poll! : {} => Result [Exited { exit_code : I32, stdout : List U8, stderr : List U8 }, Running] [PollFailed IOErr],
 }
 
 ## Spawn a child process with stdio pipes for bidirectional communication.
@@ -266,7 +272,7 @@ ChildProcess : {
 ## Returns a record of functions bound to the spawned process.
 ##
 ## ```
-## { write_stdin!, read_stdout!, read_stderr!, kill!, wait! } =
+## { write_stdin!, read_stdout!, read_stderr!, close_stdin!, kill!, wait!, poll! } =
 ##     Cmd.new("node")
 ##     |> Cmd.arg("repl.js")
 ##     |> Cmd.spawn!()?
@@ -307,4 +313,14 @@ spawn! = |@Cmd(cmd)|
             Host.process_wait!(id)
             |> Result.map_ok(|{ stdout_bytes, stderr_bytes, exit_code }| { exit_code, stdout: stdout_bytes, stderr: stderr_bytes })
             |> Result.map_err(|err| WaitFailed(InternalIOErr.handle_err(err))),
+
+        poll!: |{}|
+            Host.process_poll!(id)
+            |> Result.map_ok(
+                |result|
+                    when result is
+                        Running -> Running
+                        Exited({ stderr_bytes, stdout_bytes, exit_code }) -> Exited({ exit_code, stdout: stdout_bytes, stderr: stderr_bytes })
+            )
+            |> Result.map_err(|err| PollFailed(InternalIOErr.handle_err(err))),
     })
