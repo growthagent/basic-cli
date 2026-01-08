@@ -11,3 +11,10 @@ version.workspace = true
 roc_std.workspace = true
 roc_io_error.workspace = true
 lazy_static = "1.4"
+
+# For spawn_grouped! functionality
+command-group = "5"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+nix = { version = "0.29", features = ["process", "signal"] }

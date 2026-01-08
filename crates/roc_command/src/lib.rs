@@ -1,22 +1,221 @@
 //! This crate provides common functionality for Roc to interface with `std::process::Command`
 
-use roc_std::{roc_refcounted_noop_impl, RocList, RocRefcounted, RocResult, RocStr};
+use command_group::{CommandGroup, GroupChild};
+use roc_std::{RocList, RocRefcounted, RocResult, RocStr};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
+use std::thread;
 
-// Global storage for spawned processes
+/// Lock a mutex, recovering if it was poisoned by a panic in another thread.
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Read stdout and stderr concurrently to avoid deadlock when both pipes have large data.
+///
+/// Without concurrent reading, if both pipes fill their buffers (~64KB each), the child
+/// blocks writing and the parent blocks reading, causing deadlock.
+///
+/// Returns individual results for each pipe so callers can handle partial success.
+fn read_pipes_concurrently(
+    stdout: Option<ChildStdout>,
+    stderr: Option<std::process::ChildStderr>,
+) -> (std::io::Result<Vec<u8>>, std::io::Result<Vec<u8>>) {
+    let stdout_handle = stdout.map(|mut pipe| {
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).map(|_| bytes)
+        })
+    });
+
+    let stderr_handle = stderr.map(|mut pipe| {
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).map(|_| bytes)
+        })
+    });
+
+    let stdout_result = stdout_handle
+        .map(|h| h.join().unwrap_or_else(|_| Ok(Vec::new())))
+        .unwrap_or_else(|| Ok(Vec::new()));
+    let stderr_result = stderr_handle
+        .map(|h| h.join().unwrap_or_else(|_| Ok(Vec::new())))
+        .unwrap_or_else(|| Ok(Vec::new()));
+
+    (stdout_result, stderr_result)
+}
+
+// =============================================================================
+// Trait and helpers to reduce duplication between spawn! and spawn_grouped!
+// =============================================================================
+
+/// Trait abstracting over Child and GroupChild for common operations.
+trait ChildLike {
+    fn kill(&mut self) -> std::io::Result<()>;
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus>;
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>>;
+}
+
+impl ChildLike for Child {
+    fn kill(&mut self) -> std::io::Result<()> { Child::kill(self) }
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> { Child::wait(self) }
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> { Child::try_wait(self) }
+}
+
+impl ChildLike for GroupChild {
+    fn kill(&mut self) -> std::io::Result<()> { GroupChild::kill(self) }
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> { GroupChild::wait(self) }
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> { GroupChild::try_wait(self) }
+}
+
+/// Generic process struct used by both spawn! and spawn_grouped!
+struct Process<C> {
+    child: C,
+    stdin: Option<ChildStdin>,
+    stdout: Option<ChildStdout>,
+    stderr: Option<std::process::ChildStderr>,
+}
+
+/// Write bytes to a process's stdin
+fn write_to_stdin(stdin: &mut Option<ChildStdin>, bytes: &[u8]) -> RocResult<(), roc_io_error::IOErr> {
+    match stdin {
+        Some(ref mut handle) => {
+            match handle.write_all(bytes) {
+                Ok(()) => match handle.flush() {
+                    Ok(()) => RocResult::ok(()),
+                    Err(err) => RocResult::err(err.into()),
+                },
+                Err(err) => RocResult::err(err.into()),
+            }
+        }
+        None => RocResult::err(roc_io_error::IOErr {
+            tag: roc_io_error::IOErrTag::Other,
+            msg: "Process stdin not available".into(),
+        }),
+    }
+}
+
+/// Read exactly n bytes from stdout
+fn read_from_stdout(stdout: &mut Option<ChildStdout>, num_bytes: u64) -> RocResult<RocList<u8>, roc_io_error::IOErr> {
+    match stdout {
+        Some(ref mut handle) => {
+            let mut buffer = vec![0u8; num_bytes as usize];
+            match handle.read_exact(&mut buffer) {
+                Ok(()) => RocResult::ok(RocList::from(&buffer[..])),
+                Err(err) => RocResult::err(err.into()),
+            }
+        }
+        None => RocResult::err(roc_io_error::IOErr {
+            tag: roc_io_error::IOErrTag::Other,
+            msg: "Process stdout not available".into(),
+        }),
+    }
+}
+
+/// Read exactly n bytes from stderr
+fn read_from_stderr(stderr: &mut Option<std::process::ChildStderr>, num_bytes: u64) -> RocResult<RocList<u8>, roc_io_error::IOErr> {
+    match stderr {
+        Some(ref mut handle) => {
+            let mut buffer = vec![0u8; num_bytes as usize];
+            match handle.read_exact(&mut buffer) {
+                Ok(()) => RocResult::ok(RocList::from(&buffer[..])),
+                Err(err) => RocResult::err(err.into()),
+            }
+        }
+        None => RocResult::err(roc_io_error::IOErr {
+            tag: roc_io_error::IOErrTag::Other,
+            msg: "Process stderr not available".into(),
+        }),
+    }
+}
+
+/// Kill a process and reap it
+fn kill_process<C: ChildLike>(process: &mut Process<C>) -> RocResult<(), roc_io_error::IOErr> {
+    match process.child.kill() {
+        Ok(()) => {
+            let _ = process.child.wait();
+            RocResult::ok(())
+        }
+        Err(err) => RocResult::err(err.into()),
+    }
+}
+
+/// Wait for a process to exit and return its output
+fn wait_for_process<C: ChildLike>(process: &mut Process<C>) -> RocResult<ProcessOutput, roc_io_error::IOErr> {
+    let (stdout_result, stderr_result) = read_pipes_concurrently(
+        process.stdout.take(),
+        process.stderr.take(),
+    );
+
+    // Propagate pipe read errors
+    let stdout_bytes = match stdout_result {
+        Ok(bytes) => bytes,
+        Err(err) => return RocResult::err(err.into()),
+    };
+    let stderr_bytes = match stderr_result {
+        Ok(bytes) => bytes,
+        Err(err) => return RocResult::err(err.into()),
+    };
+
+    match process.child.wait() {
+        Ok(status) => {
+            let exit_code = status.code().unwrap_or(-1);
+            RocResult::ok(ProcessOutput {
+                stdout_bytes: RocList::from(&stdout_bytes[..]),
+                stderr_bytes: RocList::from(&stderr_bytes[..]),
+                exit_code,
+            })
+        }
+        Err(err) => RocResult::err(err.into()),
+    }
+}
+
+/// Poll a process for exit status
+fn poll_process<C: ChildLike>(process: &mut Process<C>) -> Result<Option<ProcessOutput>, std::io::Error> {
+    match process.child.try_wait()? {
+        Some(status) => {
+            let (stdout_result, stderr_result) = read_pipes_concurrently(
+                process.stdout.take(),
+                process.stderr.take(),
+            );
+            let stdout_bytes = stdout_result?;
+            let stderr_bytes = stderr_result?;
+            let exit_code = status.code().unwrap_or(-1);
+            Ok(Some(ProcessOutput {
+                stdout_bytes: RocList::from(&stdout_bytes[..]),
+                stderr_bytes: RocList::from(&stderr_bytes[..]),
+                exit_code,
+            }))
+        }
+        None => Ok(None),
+    }
+}
+
+fn not_found_error(msg: &str) -> roc_io_error::IOErr {
+    roc_io_error::IOErr {
+        tag: roc_io_error::IOErrTag::NotFound,
+        msg: msg.into(),
+    }
+}
+
+// Type aliases for clarity
+type SpawnedProcess = Process<Child>;
+type GroupedProcess = Process<GroupChild>;
+
+// Global storage for spawned processes (regular spawn!)
 lazy_static::lazy_static! {
     static ref PROCESSES: Mutex<HashMap<u64, SpawnedProcess>> = Mutex::new(HashMap::new());
     static ref NEXT_PROCESS_ID: Mutex<u64> = Mutex::new(1);
 }
 
-struct SpawnedProcess {
-    child: Child,
-    stdin: Option<ChildStdin>,
-    stdout: Option<ChildStdout>,
-    stderr: Option<std::process::ChildStderr>,
+// Global storage for grouped processes (spawn_grouped! - cleaned up on exit)
+// Uses process groups on Unix and Job Objects on Windows to ensure the
+// entire process tree is killed when the parent dies.
+lazy_static::lazy_static! {
+    static ref GROUPED_PROCESSES: Mutex<HashMap<u64, GroupedProcess>> = Mutex::new(HashMap::new());
+    static ref NEXT_GROUPED_ID: Mutex<u64> = Mutex::new(1);
 }
 
 #[derive(Clone, Debug, PartialEq, PartialOrd, Eq, Ord, Hash)]
@@ -108,12 +307,10 @@ impl roc_std::RocRefcounted for OutputFromHostSuccess {
 
 impl roc_std::RocRefcounted for OutputFromHostFailure {
     fn inc(&mut self) {
-        self.exit_code.inc();
         self.stdout_bytes.inc();
         self.stderr_bytes.inc();
     }
     fn dec(&mut self) {
-        self.exit_code.dec();
         self.stdout_bytes.dec();
         self.stderr_bytes.dec();
     }
@@ -184,23 +381,21 @@ pub fn command_spawn_with_pipes(roc_cmd: &Command) -> RocResult<u64, roc_io_erro
 
     match cmd.spawn() {
         Ok(mut child) => {
-            let stdin = child.stdin.take();
-            let stdout = child.stdout.take();
-            let stderr = child.stderr.take();
-
             let process_id = {
-                let mut next_id = NEXT_PROCESS_ID.lock().unwrap();
+                let mut next_id = lock_or_recover(&NEXT_PROCESS_ID);
                 let id = *next_id;
                 *next_id += 1;
                 id
             };
 
+            let process = Process {
+                stdin: child.stdin.take(),
+                stdout: child.stdout.take(),
+                stderr: child.stderr.take(),
+                child,
+            };
 
-            {
-                let mut processes = PROCESSES.lock().unwrap();
-                processes.insert(process_id, SpawnedProcess { child, stdin, stdout, stderr });
-            }
-
+            lock_or_recover(&PROCESSES).insert(process_id, process);
             RocResult::ok(process_id)
         }
         Err(err) => RocResult::err(err.into()),
@@ -209,124 +404,49 @@ pub fn command_spawn_with_pipes(roc_cmd: &Command) -> RocResult<u64, roc_io_erro
 
 /// Write bytes to a spawned process's stdin
 pub fn process_write_bytes(process_id: u64, bytes: &RocList<u8>) -> RocResult<(), roc_io_error::IOErr> {
-    let mut processes = PROCESSES.lock().unwrap();
-
+    let mut processes = lock_or_recover(&PROCESSES);
     match processes.get_mut(&process_id) {
-        Some(process) => {
-            match &mut process.stdin {
-                Some(stdin) => {
-                    match stdin.write_all(bytes.as_slice()) {
-                        Ok(()) => {
-                            match stdin.flush() {
-                                Ok(()) => RocResult::ok(()),
-                                Err(err) => RocResult::err(err.into()),
-                            }
-                        }
-                        Err(err) => RocResult::err(err.into()),
-                    }
-                }
-                None => RocResult::err(roc_io_error::IOErr {
-                    tag: roc_io_error::IOErrTag::Other,
-                    msg: "Process stdin not available".into(),
-                }),
-            }
-        }
-        None => RocResult::err(roc_io_error::IOErr {
-            tag: roc_io_error::IOErrTag::NotFound,
-            msg: "Process not found".into(),
-        }),
+        Some(process) => write_to_stdin(&mut process.stdin, bytes.as_slice()),
+        None => RocResult::err(not_found_error("Process not found")),
     }
 }
 
 /// Read exactly n bytes from a spawned process's stdout
 pub fn process_read_bytes(process_id: u64, num_bytes: u64) -> RocResult<RocList<u8>, roc_io_error::IOErr> {
-    let mut processes = PROCESSES.lock().unwrap();
-
+    let mut processes = lock_or_recover(&PROCESSES);
     match processes.get_mut(&process_id) {
-        Some(process) => {
-            match &mut process.stdout {
-                Some(stdout) => {
-                    let mut buffer = vec![0u8; num_bytes as usize];
-                    match stdout.read_exact(&mut buffer) {
-                        Ok(()) => RocResult::ok(RocList::from(&buffer[..])),
-                        Err(err) => RocResult::err(err.into()),
-                    }
-                }
-                None => RocResult::err(roc_io_error::IOErr {
-                    tag: roc_io_error::IOErrTag::Other,
-                    msg: "Process stdout not available".into(),
-                }),
-            }
-        }
-        None => RocResult::err(roc_io_error::IOErr {
-            tag: roc_io_error::IOErrTag::NotFound,
-            msg: "Process not found".into(),
-        }),
+        Some(process) => read_from_stdout(&mut process.stdout, num_bytes),
+        None => RocResult::err(not_found_error("Process not found")),
     }
 }
 
 /// Read exactly n bytes from a spawned process's stderr
 pub fn process_read_stderr_bytes(process_id: u64, num_bytes: u64) -> RocResult<RocList<u8>, roc_io_error::IOErr> {
-    let mut processes = PROCESSES.lock().unwrap();
-
+    let mut processes = lock_or_recover(&PROCESSES);
     match processes.get_mut(&process_id) {
-        Some(process) => {
-            match &mut process.stderr {
-                Some(stderr) => {
-                    let mut buffer = vec![0u8; num_bytes as usize];
-                    match stderr.read_exact(&mut buffer) {
-                        Ok(()) => RocResult::ok(RocList::from(&buffer[..])),
-                        Err(err) => RocResult::err(err.into()),
-                    }
-                }
-                None => RocResult::err(roc_io_error::IOErr {
-                    tag: roc_io_error::IOErrTag::Other,
-                    msg: "Process stderr not available".into(),
-                }),
-            }
-        }
-        None => RocResult::err(roc_io_error::IOErr {
-            tag: roc_io_error::IOErrTag::NotFound,
-            msg: "Process not found".into(),
-        }),
+        Some(process) => read_from_stderr(&mut process.stderr, num_bytes),
+        None => RocResult::err(not_found_error("Process not found")),
     }
 }
 
 /// Close a spawned process's stdin (sends EOF to child)
 pub fn process_close_stdin(process_id: u64) -> RocResult<(), roc_io_error::IOErr> {
-    let mut processes = PROCESSES.lock().unwrap();
-
+    let mut processes = lock_or_recover(&PROCESSES);
     match processes.get_mut(&process_id) {
         Some(process) => {
-            process.stdin = None; // Drop the handle, sends EOF to child
+            process.stdin = None;
             RocResult::ok(())
         }
-        None => RocResult::err(roc_io_error::IOErr {
-            tag: roc_io_error::IOErrTag::NotFound,
-            msg: "Process not found".into(),
-        }),
+        None => RocResult::err(not_found_error("Process not found")),
     }
 }
 
 /// Kill a spawned process
 pub fn process_kill(process_id: u64) -> RocResult<(), roc_io_error::IOErr> {
-    let mut processes = PROCESSES.lock().unwrap();
-
+    let mut processes = lock_or_recover(&PROCESSES);
     match processes.remove(&process_id) {
-        Some(mut process) => {
-            match process.child.kill() {
-                Ok(()) => {
-                    // Wait to reap the process
-                    let _ = process.child.wait();
-                    RocResult::ok(())
-                }
-                Err(err) => RocResult::err(err.into()),
-            }
-        }
-        None => RocResult::err(roc_io_error::IOErr {
-            tag: roc_io_error::IOErrTag::NotFound,
-            msg: "Process not found".into(),
-        }),
+        Some(mut process) => kill_process(&mut process),
+        None => RocResult::err(not_found_error("Process not found")),
     }
 }
 
@@ -354,37 +474,10 @@ impl roc_std::RocRefcounted for ProcessOutput {
 
 /// Wait for a spawned process to exit and return its output
 pub fn process_wait(process_id: u64) -> RocResult<ProcessOutput, roc_io_error::IOErr> {
-    let mut processes = PROCESSES.lock().unwrap();
-
+    let mut processes = lock_or_recover(&PROCESSES);
     match processes.remove(&process_id) {
-        Some(mut process) => {
-            // Read all stdout and stderr before waiting
-            let mut stdout_bytes = Vec::new();
-            let mut stderr_bytes = Vec::new();
-
-            if let Some(mut stdout) = process.stdout.take() {
-                let _ = stdout.read_to_end(&mut stdout_bytes);
-            }
-            if let Some(mut stderr) = process.stderr.take() {
-                let _ = stderr.read_to_end(&mut stderr_bytes);
-            }
-
-            match process.child.wait() {
-                Ok(status) => {
-                    let exit_code = status.code().unwrap_or(-1);
-                    RocResult::ok(ProcessOutput {
-                        stdout_bytes: RocList::from(&stdout_bytes[..]),
-                        stderr_bytes: RocList::from(&stderr_bytes[..]),
-                        exit_code,
-                    })
-                }
-                Err(err) => RocResult::err(err.into()),
-            }
-        }
-        None => RocResult::err(roc_io_error::IOErr {
-            tag: roc_io_error::IOErrTag::NotFound,
-            msg: "Process not found".into(),
-        }),
+        Some(mut process) => wait_for_process(&mut process),
+        None => RocResult::err(not_found_error("Process not found")),
     }
 }
 
@@ -515,42 +608,157 @@ const _: () = {
 /// This matches `process_wait` behavior and is safe because read errors on pipes
 /// from exited processes are extremely rare (data is kernel-buffered).
 pub fn process_poll(process_id: u64) -> RocResult<PollResult, roc_io_error::IOErr> {
-    let mut processes = PROCESSES.lock().unwrap();
+    let mut processes = lock_or_recover(&PROCESSES);
 
     match processes.get_mut(&process_id) {
-        Some(process) => {
-            match process.child.try_wait() {
-                Ok(Some(status)) => {
-                    // Process has exited - remove it from the map and collect output
-                    let mut process = processes.remove(&process_id).unwrap();
-
-                    let mut stdout_bytes = Vec::new();
-                    let mut stderr_bytes = Vec::new();
-
-                    if let Some(mut stdout) = process.stdout.take() {
-                        let _ = stdout.read_to_end(&mut stdout_bytes);
-                    }
-                    if let Some(mut stderr) = process.stderr.take() {
-                        let _ = stderr.read_to_end(&mut stderr_bytes);
-                    }
-
-                    let exit_code = status.code().unwrap_or(-1);
-                    RocResult::ok(PollResult::Exited(
-                        exit_code,
-                        RocList::from(&stdout_bytes[..]),
-                        RocList::from(&stderr_bytes[..]),
-                    ))
-                }
-                Ok(None) => {
-                    // Process is still running
-                    RocResult::ok(PollResult::Running())
-                }
-                Err(err) => RocResult::err(err.into()),
+        Some(process) => match poll_process(process) {
+            Ok(Some(output)) => {
+                processes.remove(&process_id);
+                RocResult::ok(PollResult::Exited(output.exit_code, output.stdout_bytes, output.stderr_bytes))
             }
+            Ok(None) => RocResult::ok(PollResult::Running()),
+            Err(err) => RocResult::err(err.into()),
+        },
+        None => RocResult::err(not_found_error("Process not found")),
+    }
+}
+
+// =============================================================================
+// spawn_grouped! - Processes that are automatically cleaned up when parent exits
+// =============================================================================
+
+/// Spawn a process in a managed group that dies with the parent.
+///
+/// Platform behavior:
+/// - **Linux**: Uses PR_SET_PDEATHSIG so child receives SIGKILL when parent dies.
+///   100% reliable even for SIGKILL of parent.
+/// - **macOS**: Uses process groups. Handles normal exit, SIGINT, SIGTERM, crashes.
+///   Children may survive if parent is killed with SIGKILL (macOS kernel limitation).
+/// - **Windows**: Uses Job Objects (via command-group) to automatically kill
+///   all children when the parent exits. 100% reliable.
+pub fn command_spawn_grouped(roc_cmd: &Command) -> RocResult<u64, roc_io_error::IOErr> {
+    let mut cmd = std::process::Command::from(roc_cmd);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    // On Linux, set PR_SET_PDEATHSIG so child dies when parent dies (even SIGKILL)
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                let ret = libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                if ret == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
         }
-        None => RocResult::err(roc_io_error::IOErr {
-            tag: roc_io_error::IOErrTag::NotFound,
-            msg: "Process not found".into(),
-        }),
+    }
+
+    match cmd.group_spawn() {
+        Ok(mut child) => {
+            let process_id = {
+                let mut next_id = lock_or_recover(&NEXT_GROUPED_ID);
+                let id = *next_id;
+                *next_id += 1;
+                id
+            };
+
+            let process = Process {
+                stdin: child.inner().stdin.take(),
+                stdout: child.inner().stdout.take(),
+                stderr: child.inner().stderr.take(),
+                child,
+            };
+
+            lock_or_recover(&GROUPED_PROCESSES).insert(process_id, process);
+            RocResult::ok(process_id)
+        }
+        Err(err) => RocResult::err(err.into()),
+    }
+}
+
+/// Kill all grouped processes. Called automatically on exit.
+pub fn process_kill_all_grouped() -> RocResult<(), roc_io_error::IOErr> {
+    let mut processes = lock_or_recover(&GROUPED_PROCESSES);
+    for (_, mut process) in processes.drain() {
+        let _ = kill_process(&mut process);
+    }
+    RocResult::ok(())
+}
+
+/// Kill a specific grouped process by ID
+pub fn grouped_process_kill(process_id: u64) -> RocResult<(), roc_io_error::IOErr> {
+    let mut processes = lock_or_recover(&GROUPED_PROCESSES);
+    match processes.remove(&process_id) {
+        Some(mut process) => kill_process(&mut process),
+        None => RocResult::err(not_found_error("Grouped process not found")),
+    }
+}
+
+/// Poll a grouped process for exit status
+pub fn grouped_process_poll(process_id: u64) -> RocResult<PollResult, roc_io_error::IOErr> {
+    let mut processes = lock_or_recover(&GROUPED_PROCESSES);
+
+    match processes.get_mut(&process_id) {
+        Some(process) => match poll_process(process) {
+            Ok(Some(output)) => {
+                processes.remove(&process_id);
+                RocResult::ok(PollResult::Exited(output.exit_code, output.stdout_bytes, output.stderr_bytes))
+            }
+            Ok(None) => RocResult::ok(PollResult::Running()),
+            Err(err) => RocResult::err(err.into()),
+        },
+        None => RocResult::err(not_found_error("Grouped process not found")),
+    }
+}
+
+/// Wait for a grouped process to exit
+pub fn grouped_process_wait(process_id: u64) -> RocResult<ProcessOutput, roc_io_error::IOErr> {
+    let mut processes = lock_or_recover(&GROUPED_PROCESSES);
+    match processes.remove(&process_id) {
+        Some(mut process) => wait_for_process(&mut process),
+        None => RocResult::err(not_found_error("Grouped process not found")),
+    }
+}
+
+/// Write bytes to a grouped process's stdin
+pub fn grouped_process_write_bytes(process_id: u64, bytes: &RocList<u8>) -> RocResult<(), roc_io_error::IOErr> {
+    let mut processes = lock_or_recover(&GROUPED_PROCESSES);
+    match processes.get_mut(&process_id) {
+        Some(process) => write_to_stdin(&mut process.stdin, bytes.as_slice()),
+        None => RocResult::err(not_found_error("Grouped process not found")),
+    }
+}
+
+/// Read exactly n bytes from a grouped process's stdout
+pub fn grouped_process_read_bytes(process_id: u64, num_bytes: u64) -> RocResult<RocList<u8>, roc_io_error::IOErr> {
+    let mut processes = lock_or_recover(&GROUPED_PROCESSES);
+    match processes.get_mut(&process_id) {
+        Some(process) => read_from_stdout(&mut process.stdout, num_bytes),
+        None => RocResult::err(not_found_error("Grouped process not found")),
+    }
+}
+
+/// Read exactly n bytes from a grouped process's stderr
+pub fn grouped_process_read_stderr_bytes(process_id: u64, num_bytes: u64) -> RocResult<RocList<u8>, roc_io_error::IOErr> {
+    let mut processes = lock_or_recover(&GROUPED_PROCESSES);
+    match processes.get_mut(&process_id) {
+        Some(process) => read_from_stderr(&mut process.stderr, num_bytes),
+        None => RocResult::err(not_found_error("Grouped process not found")),
+    }
+}
+
+/// Close a grouped process's stdin (sends EOF to child)
+pub fn grouped_process_close_stdin(process_id: u64) -> RocResult<(), roc_io_error::IOErr> {
+    let mut processes = lock_or_recover(&GROUPED_PROCESSES);
+    match processes.get_mut(&process_id) {
+        Some(process) => {
+            process.stdin = None;
+            RocResult::ok(())
+        }
+        None => RocResult::err(not_found_error("Grouped process not found")),
     }
 }

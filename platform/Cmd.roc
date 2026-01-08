@@ -13,6 +13,8 @@ module [
     exec_cmd!,
     exec_exit_code!,
     spawn!,
+    spawn_grouped!,
+    kill_grouped!,
 ]
 
 import InternalCmd exposing [to_str]
@@ -282,7 +284,7 @@ ChildProcess : {
 ## kill!({})?
 ## ```
 ##
-## > Remember to call `kill!` or `wait!` when done to clean up resources.
+## Remember to call `kill!` or `wait!` when done to clean up resources.
 spawn! : Cmd => Result ChildProcess [SpawnFailed IOErr]
 spawn! = |@Cmd(cmd)|
     id = Host.command_spawn_with_pipes!(cmd)
@@ -324,3 +326,87 @@ spawn! = |@Cmd(cmd)|
             )
             |> Result.map_err(|err| PollFailed(InternalIOErr.handle_err(err))),
     })
+
+## Spawn a child process that gets cleaned up when the parent exits.
+##
+## Use this for test servers, subprocesses, or anything that shouldn't
+## outlive your program.
+##
+## ## Platform behavior
+##
+## **Linux and Windows**: Children are guaranteed to die when the parent exits,
+## even if the parent is killed with SIGKILL or crashes. Linux uses
+## `PR_SET_PDEATHSIG`, Windows uses Job Objects.
+##
+## **macOS**: Children die on normal exit, Ctrl+C, crashes, and most signals.
+## However, if the parent is killed with `kill -9` (SIGKILL), children may
+## survive as orphans. This is a macOS kernel limitation - there's no
+## equivalent to Linux's `PR_SET_PDEATHSIG`.
+##
+## ## Example
+##
+## ```
+## { kill!, wait!, poll!, ... } =
+##     Cmd.new("./my-test-server")
+##     |> Cmd.spawn_grouped!()?
+##
+## kill!({})?  # Kills the process tree
+## ```
+spawn_grouped! : Cmd => Result ChildProcess [SpawnFailed IOErr]
+spawn_grouped! = |@Cmd(cmd)|
+    id = Host.command_spawn_grouped!(cmd)
+        |> Result.map_err(|err| SpawnFailed(InternalIOErr.handle_err(err)))?
+
+    Ok({
+        write_stdin!: |bytes|
+            Host.grouped_process_write_bytes!(id, bytes)
+            |> Result.map_err(|err| WriteFailed(InternalIOErr.handle_err(err))),
+
+        read_stdout!: |num_bytes|
+            Host.grouped_process_read_bytes!(id, num_bytes)
+            |> Result.map_err(|err| ReadFailed(InternalIOErr.handle_err(err))),
+
+        read_stderr!: |num_bytes|
+            Host.grouped_process_read_stderr_bytes!(id, num_bytes)
+            |> Result.map_err(|err| ReadFailed(InternalIOErr.handle_err(err))),
+
+        close_stdin!: |{}|
+            Host.grouped_process_close_stdin!(id)
+            |> Result.map_err(|err| CloseFailed(InternalIOErr.handle_err(err))),
+
+        kill!: |{}|
+            Host.grouped_process_kill!(id)
+            |> Result.map_err(|err| KillFailed(InternalIOErr.handle_err(err))),
+
+        wait!: |{}|
+            Host.grouped_process_wait!(id)
+            |> Result.map_ok(|{ stdout_bytes, stderr_bytes, exit_code }| { exit_code, stdout: stdout_bytes, stderr: stderr_bytes })
+            |> Result.map_err(|err| WaitFailed(InternalIOErr.handle_err(err))),
+
+        poll!: |{}|
+            Host.grouped_process_poll!(id)
+            |> Result.map_ok(
+                |result|
+                    when result is
+                        Running -> Running
+                        Exited({ stderr_bytes, stdout_bytes, exit_code }) -> Exited({ exit_code, stdout: stdout_bytes, stderr: stderr_bytes })
+            )
+            |> Result.map_err(|err| PollFailed(InternalIOErr.handle_err(err))),
+    })
+
+## Kill all processes spawned via `spawn_grouped!` and their children.
+##
+## This is called automatically on normal program exit, but you can call it
+## explicitly for immediate cleanup.
+##
+## ```
+## server1 = Cmd.new("./server1") |> Cmd.spawn_grouped!()?
+## server2 = Cmd.new("./server2") |> Cmd.spawn_grouped!()?
+##
+## # Kill all at once
+## Cmd.kill_grouped!({})?
+## ```
+kill_grouped! : {} => Result {} [KillFailed IOErr]
+kill_grouped! = |{}|
+    Host.process_kill_all_grouped!({})
+    |> Result.map_err(|err| KillFailed(InternalIOErr.handle_err(err)))

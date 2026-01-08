@@ -11,6 +11,15 @@ hosted [
     process_kill!,
     process_wait!,
     process_poll!,
+    command_spawn_grouped!,
+    grouped_process_write_bytes!,
+    grouped_process_read_bytes!,
+    grouped_process_read_stderr_bytes!,
+    grouped_process_close_stdin!,
+    grouped_process_kill!,
+    grouped_process_wait!,
+    grouped_process_poll!,
+    process_kill_all_grouped!,
     current_arch_os!,
     cwd!,
     dir_create!,
@@ -95,6 +104,17 @@ process_close_stdin! : U64 => Result {} InternalIOErr.IOErrFromHost
 process_kill! : U64 => Result {} InternalIOErr.IOErrFromHost
 process_wait! : U64 => Result { stdout_bytes : List U8, stderr_bytes : List U8, exit_code : I32 } InternalIOErr.IOErrFromHost
 process_poll! : U64 => Result InternalCmd.PollResult InternalIOErr.IOErrFromHost
+
+# GROUPED PROCESS (subprocess with automatic cleanup when parent exits)
+command_spawn_grouped! : InternalCmd.Command => Result U64 InternalIOErr.IOErrFromHost
+grouped_process_write_bytes! : U64, List U8 => Result {} InternalIOErr.IOErrFromHost
+grouped_process_read_bytes! : U64, U64 => Result (List U8) InternalIOErr.IOErrFromHost
+grouped_process_read_stderr_bytes! : U64, U64 => Result (List U8) InternalIOErr.IOErrFromHost
+grouped_process_close_stdin! : U64 => Result {} InternalIOErr.IOErrFromHost
+grouped_process_kill! : U64 => Result {} InternalIOErr.IOErrFromHost
+grouped_process_wait! : U64 => Result { stdout_bytes : List U8, stderr_bytes : List U8, exit_code : I32 } InternalIOErr.IOErrFromHost
+grouped_process_poll! : U64 => Result InternalCmd.PollResult InternalIOErr.IOErrFromHost
+process_kill_all_grouped! : {} => Result {} InternalIOErr.IOErrFromHost
 
 # FILE
 file_write_bytes! : List U8, List U8 => Result {} InternalIOErr.IOErrFromHost

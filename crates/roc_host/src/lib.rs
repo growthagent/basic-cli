@@ -349,6 +349,15 @@ pub fn init() {
         roc_fx_process_kill as _,
         roc_fx_process_wait as _,
         roc_fx_process_poll as _,
+        roc_fx_command_spawn_grouped as _,
+        roc_fx_grouped_process_write_bytes as _,
+        roc_fx_grouped_process_read_bytes as _,
+        roc_fx_grouped_process_read_stderr_bytes as _,
+        roc_fx_grouped_process_close_stdin as _,
+        roc_fx_grouped_process_kill as _,
+        roc_fx_grouped_process_wait as _,
+        roc_fx_grouped_process_poll as _,
+        roc_fx_process_kill_all_grouped as _,
         roc_fx_dir_create as _,
         roc_fx_dir_create_all as _,
         roc_fx_dir_delete_empty as _,
@@ -828,6 +837,72 @@ pub extern "C" fn roc_fx_process_poll(
     process_id: u64,
 ) -> RocResult<roc_command::PollResult, roc_io_error::IOErr> {
     roc_command::process_poll(process_id)
+}
+
+// === Grouped process functions (spawn_grouped!) ===
+
+#[no_mangle]
+pub extern "C" fn roc_fx_command_spawn_grouped(
+    roc_cmd: &roc_command::Command,
+) -> RocResult<u64, roc_io_error::IOErr> {
+    roc_command::command_spawn_grouped(roc_cmd)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_grouped_process_write_bytes(
+    process_id: u64,
+    bytes: &RocList<u8>,
+) -> RocResult<(), roc_io_error::IOErr> {
+    roc_command::grouped_process_write_bytes(process_id, bytes)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_grouped_process_read_bytes(
+    process_id: u64,
+    num_bytes: u64,
+) -> RocResult<RocList<u8>, roc_io_error::IOErr> {
+    roc_command::grouped_process_read_bytes(process_id, num_bytes)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_grouped_process_read_stderr_bytes(
+    process_id: u64,
+    num_bytes: u64,
+) -> RocResult<RocList<u8>, roc_io_error::IOErr> {
+    roc_command::grouped_process_read_stderr_bytes(process_id, num_bytes)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_grouped_process_close_stdin(
+    process_id: u64,
+) -> RocResult<(), roc_io_error::IOErr> {
+    roc_command::grouped_process_close_stdin(process_id)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_grouped_process_kill(
+    process_id: u64,
+) -> RocResult<(), roc_io_error::IOErr> {
+    roc_command::grouped_process_kill(process_id)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_grouped_process_wait(
+    process_id: u64,
+) -> RocResult<roc_command::ProcessOutput, roc_io_error::IOErr> {
+    roc_command::grouped_process_wait(process_id)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_grouped_process_poll(
+    process_id: u64,
+) -> RocResult<roc_command::PollResult, roc_io_error::IOErr> {
+    roc_command::grouped_process_poll(process_id)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_process_kill_all_grouped() -> RocResult<(), roc_io_error::IOErr> {
+    roc_command::process_kill_all_grouped()
 }
 
 #[no_mangle]
