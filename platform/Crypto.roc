@@ -65,8 +65,21 @@ random_bytes! : U32 => Result (List U8) Str
 random_bytes! = |length|
   Host.random_bytes!(length)
 
-## Hash a password using bcrypt with the specified cost factor.
-bcrypt_hash! : List U8, U32 => Result (List U8) Str
+## Hash a password using bcrypt.
+##
+## Returns the hash as a string in the standard bcrypt format (`$2b$cost$...`),
+## which can be stored directly in a database and passed to `bcrypt_verify!`.
+##
+## Parameters:
+## - `password`: The password to hash
+## - `cost`: Work factor between 4 and 31 (inclusive). Each increment doubles computation time.
+##
+## Security recommendations:
+## - Cost 10: ~100ms on modern hardware (minimum for production)
+## - Cost 12: ~400ms (good default for most applications)
+## - Cost 14: ~1.6s (high security)
+## - Values below 10 are generally considered insufficient for password storage.
+bcrypt_hash! : List U8, U32 => Result Str Str
 bcrypt_hash! = |password, cost|
   Host.bcrypt_hash!(password, cost)
 

@@ -1033,7 +1033,7 @@ pub extern "C" fn roc_fx_random_bytes(length: u32) -> RocResult<RocList<u8>, Roc
 }
 
 #[no_mangle]
-pub extern "C" fn roc_fx_bcrypt_hash(password: &RocList<u8>, cost: u32) -> RocResult<RocList<u8>, RocStr> {
+pub extern "C" fn roc_fx_bcrypt_hash(password: &RocList<u8>, cost: u32) -> RocResult<RocStr, RocStr> {
     roc_crypto::bcrypt_hash(password, cost)
 }
 

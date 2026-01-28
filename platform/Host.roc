@@ -180,7 +180,7 @@ pbkdf2_hmac_sha256! : List U8, List U8, U32, U32 => List U8
 decrypt_aes256_gcm! : List U8, List U8, List U8, List U8 => Result (List U8) Str
 encrypt_aes256_gcm! : List U8, List U8, List U8 => Result { ciphertext : List U8, auth_tag : List U8 } Str
 random_bytes! : U32 => Result (List U8) Str
-bcrypt_hash! : List U8, U32 => Result (List U8) Str
+bcrypt_hash! : List U8, U32 => Result Str Str
 bcrypt_verify! : List U8, Str => Result Bool Str
 
 # OTHERS
