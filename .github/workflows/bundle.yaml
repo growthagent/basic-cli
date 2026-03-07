@@ -6,11 +6,16 @@ on:
       - published
 
 jobs:
-  bundle:
-    name: Bundle Platform
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+  build:
+    name: Build ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x64
+          - os: macos-latest
+            target: macos-arm64
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Check out the repository
         uses: actions/checkout@v4
@@ -28,8 +33,44 @@ jobs:
 
       - name: Verify host files exist
         run: |
+          ls -la platform/${{ matrix.target }}.rh
+          ls -la platform/metadata_${{ matrix.target }}.rm
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            platform/${{ matrix.target }}.*
+            platform/metadata_${{ matrix.target }}.*
+
+  bundle:
+    name: Bundle Platform
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: platform/
+          merge-multiple: true
+
+      - name: Verify all host files exist
+        run: |
           ls -la platform/linux-x64.rh
           ls -la platform/metadata_linux-x64.rm
+          ls -la platform/macos-arm64.rh
+          ls -la platform/metadata_macos-arm64.rm
+
+      - name: Install Roc
+        uses: hasnep/setup-roc@main
+        with:
+          roc-version: nightly
 
       - name: Bundle and release the platform
         uses: hasnep/bundle-roc-library@v0.1.0
