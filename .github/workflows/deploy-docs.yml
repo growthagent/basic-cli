@@ -6,9 +6,10 @@ on:
       - main
     paths:
       - '**.roc'
-  release:
+  workflow_run:
+    workflows: ["Bundle Platform"]
     types:
-      - created
+      - completed
 
   workflow_dispatch:
 
