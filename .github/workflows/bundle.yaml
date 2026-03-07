@@ -72,6 +72,17 @@ jobs:
         with:
           roc-version: nightly
 
+      - name: Generate docs
+        run: roc docs platform/main.roc
+
+      - name: Package docs
+        run: tar -czf docs.tar.gz -C generated-docs .
+
+      - name: Upload docs to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" docs.tar.gz --repo "${{ github.repository }}"
+
       - name: Bundle and release the platform
         uses: hasnep/bundle-roc-library@v0.1.0
         with:
