@@ -73,6 +73,8 @@ jobs:
           roc-version: nightly
 
       - name: Generate docs
+        env:
+          ROC_DOCS_URL_ROOT: /basic-cli/${{ github.event.release.tag_name }}
         run: roc docs platform/main.roc
 
       - name: Package docs
