@@ -1,6 +1,10 @@
 # NOTE: We probably want to split this into several (sub-)modules as we add more functionality and
 # a natural structure becomes apparent.
 module [
+  HashAlgorithm,
+  hash!,
+  hash_file!,
+  hash_file_chunks!,
   bcrypt_hash!,
   bcrypt_verify!,
   decrypt_aes256_gcm!,
@@ -10,6 +14,58 @@ module [
 ]
 
 import Host
+
+## Supported hash algorithms.
+HashAlgorithm : [Sha1, Sha256, Sha384, Sha512]
+
+algorithm_to_str : HashAlgorithm -> Str
+algorithm_to_str = |algorithm|
+    when algorithm is
+        Sha1 -> "SHA-1"
+        Sha256 -> "SHA-256"
+        Sha384 -> "SHA-384"
+        Sha512 -> "SHA-512"
+
+## Hash bytes and return the hex digest.
+##
+## ```roc
+## digest = Crypto.hash!(Str.to_utf8("hello"), Sha256)
+## # "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+## ```
+hash! : List U8, HashAlgorithm => Str
+hash! = |bytes, algorithm|
+    Host.hash!(bytes, algorithm_to_str(algorithm))
+
+## Hash a file by path and return the hex digest.
+## Reads the entire file into memory.
+##
+## ```roc
+## digest = Crypto.hash_file!("path/to/file.zip", Sha1)?
+## ```
+hash_file! : Str, HashAlgorithm => Result Str Str
+hash_file! = |path, algorithm|
+    Host.hash_file!(path, algorithm_to_str(algorithm))
+
+## Hash a file in chunks and return the hex digest.
+##
+## Splits the file into chunks of `chunk_size_bytes`, hashes each chunk,
+## concatenates the raw digest bytes, then hashes the concatenation.
+##
+## This matches the algorithm used by joy's frontend `Crypto.hash_file_chunks!`,
+## so server-side and client-side hashes match for the same file + chunk size.
+##
+## `chunk_size_bytes` must be at least 1. A value of 0 is clamped to 1 to match
+## joy's behaviour.
+##
+## ```roc
+## digest = Crypto.hash_file_chunks!(
+##     "path/to/file.zip",
+##     { algorithm: Sha1, chunk_size_bytes: 16_000_000 },
+## )?
+## ```
+hash_file_chunks! : Str, { algorithm : HashAlgorithm, chunk_size_bytes : U64 } => Result Str Str
+hash_file_chunks! = |path, { algorithm, chunk_size_bytes }|
+    Host.hash_file_chunks!(path, algorithm_to_str(algorithm), chunk_size_bytes)
 
 ## Decrypt a ciphertext encrypted with AES256-GCM.
 decrypt_aes256_gcm! : { ciphertext : List U8, key : List U8, nonce: List U8, auth_tag : List U8 } => Result (List U8) Str

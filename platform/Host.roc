@@ -84,6 +84,9 @@ hosted [
     random_bytes!,
     bcrypt_hash!,
     bcrypt_verify!,
+    hash!,
+    hash_file!,
+    hash_file_chunks!,
 ]
 
 import InternalHttp
@@ -182,6 +185,9 @@ encrypt_aes256_gcm! : List U8, List U8, List U8 => Result { ciphertext : List U8
 random_bytes! : U32 => Result (List U8) Str
 bcrypt_hash! : List U8, U32 => Result Str Str
 bcrypt_verify! : List U8, Str => Result Bool Str
+hash! : List U8, Str => Str
+hash_file! : Str, Str => Result Str Str
+hash_file_chunks! : Str, Str, U64 => Result Str Str
 
 # OTHERS
 current_arch_os! : {} => { arch : Str, os : Str }

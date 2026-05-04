@@ -380,6 +380,9 @@ pub fn init() {
         roc_fx_random_bytes as _,
         roc_fx_bcrypt_hash as _,
         roc_fx_bcrypt_verify as _,
+        roc_fx_hash as _,
+        roc_fx_hash_file as _,
+        roc_fx_hash_file_chunks as _,
     ];
     #[allow(forgetting_references)]
     std::mem::forget(std::hint::black_box(funcs));
@@ -1040,5 +1043,20 @@ pub extern "C" fn roc_fx_bcrypt_hash(password: &RocList<u8>, cost: u32) -> RocRe
 #[no_mangle]
 pub extern "C" fn roc_fx_bcrypt_verify(password: &RocList<u8>, hash: &RocStr) -> RocResult<bool, RocStr> {
     roc_crypto::bcrypt_verify(password, hash)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_hash(bytes: &RocList<u8>, algorithm: &RocStr) -> RocStr {
+    roc_crypto::hash(bytes, algorithm)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_hash_file(path: &RocStr, algorithm: &RocStr) -> RocResult<RocStr, RocStr> {
+    roc_crypto::hash_file(path, algorithm)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_hash_file_chunks(path: &RocStr, algorithm: &RocStr, chunk_size_bytes: u64) -> RocResult<RocStr, RocStr> {
+    roc_crypto::hash_file_chunks(path, algorithm, chunk_size_bytes)
 }
 
