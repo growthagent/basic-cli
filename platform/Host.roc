@@ -36,8 +36,11 @@ hosted [
     file_reader!,
     file_read_line!,
     file_size_in_bytes!,
+    file_read_bytes_at!,
     file_write_bytes!,
+    file_write_bytes_at!,
     file_write_utf8!,
+    file_set_len!,
     file_is_executable!,
     file_is_readable!,
     file_is_writable!,
@@ -85,8 +88,6 @@ hosted [
     bcrypt_hash!,
     bcrypt_verify!,
     hash!,
-    hash_file!,
-    hash_file_chunks!,
 ]
 
 import InternalHttp
@@ -121,7 +122,10 @@ process_kill_all_grouped! : {} => Result {} InternalIOErr.IOErrFromHost
 
 # FILE
 file_write_bytes! : List U8, List U8 => Result {} InternalIOErr.IOErrFromHost
+file_write_bytes_at! : List U8, U64, List U8 => Result {} InternalIOErr.IOErrFromHost
+file_read_bytes_at! : List U8, U64, U64 => Result (List U8) InternalIOErr.IOErrFromHost
 file_write_utf8! : List U8, Str => Result {} InternalIOErr.IOErrFromHost
+file_set_len! : List U8, U64 => Result {} InternalIOErr.IOErrFromHost
 file_delete! : List U8 => Result {} InternalIOErr.IOErrFromHost
 file_read_bytes! : List U8 => Result (List U8) InternalIOErr.IOErrFromHost
 file_size_in_bytes! : List U8 => Result U64 InternalIOErr.IOErrFromHost
@@ -186,8 +190,6 @@ random_bytes! : U32 => Result (List U8) Str
 bcrypt_hash! : List U8, U32 => Result Str Str
 bcrypt_verify! : List U8, Str => Result Bool Str
 hash! : List U8, Str => Str
-hash_file! : Str, Str => Result Str Str
-hash_file_chunks! : Str, Str, U64 => Result Str Str
 
 # OTHERS
 current_arch_os! : {} => { arch : Str, os : Str }

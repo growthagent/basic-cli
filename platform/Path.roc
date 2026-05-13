@@ -12,9 +12,12 @@ module [
     type!,
     write_utf8!,
     write_bytes!,
+    write_bytes_at!,
     write!,
+    set_len!,
     read_utf8!,
     read_bytes!,
+    read_bytes_at!,
     delete!,
     list_dir!,
     create_dir!,
@@ -98,6 +101,56 @@ write_utf8! = |str, path|
     path_bytes = InternalPath.to_bytes(path)
 
     Host.file_write_utf8!(path_bytes, str)
+    |> Result.map_err(|err| FileWriteErr(path, InternalIOErr.handle_err(err)))
+
+## Writes bytes to a file at a specific byte offset. Unix only; returns `Unsupported` on Windows.
+##
+## ```
+## Path.write_bytes_at!([1, 2, 3], 16, Path.from_str("sparse.bin"))?
+## ```
+##
+## The file must already exist; use [Path.set_len!] to create it first. This is deliberate: callers (e.g. chunked-upload protocols) typically allocate the final size up front, so a missing file at write time is a real bug rather than a recoverable state.
+##
+## Writing past the current end extends the file with zeros in the gap. Concurrent calls at non-overlapping offsets are safe — wraps POSIX `pwrite`, which doesn't touch the file's seek position.
+##
+## > [`File.write_bytes_at!`](File#write_bytes_at!) does the same thing, except it takes a [Str] instead of a [Path].
+write_bytes_at! : List U8, U64, Path => Result {} [FileWriteErr Path IOErr]
+write_bytes_at! = |bytes, offset, path|
+    path_bytes = InternalPath.to_bytes(path)
+
+    Host.file_write_bytes_at!(path_bytes, offset, bytes)
+    |> Result.map_err(|err| FileWriteErr(path, InternalIOErr.handle_err(err)))
+
+## Reads exactly `len` bytes from a file starting at `offset`. Unix only; returns `Unsupported` on Windows.
+##
+## ```
+## bytes = Path.read_bytes_at!(Path.from_str("sparse.bin"), 16, 1024)?
+## ```
+##
+## Wraps POSIX `pread`. Errors if the requested range goes past the end of the file. Concurrent reads at any offsets are safe.
+##
+## > [`File.read_bytes_at!`](File#read_bytes_at!) does the same thing, except it takes a [Str] instead of a [Path].
+read_bytes_at! : Path, U64, U64 => Result (List U8) [FileReadErr Path IOErr]
+read_bytes_at! = |path, offset, len|
+    path_bytes = InternalPath.to_bytes(path)
+
+    Host.file_read_bytes_at!(path_bytes, offset, len)
+    |> Result.map_err(|err| FileReadErr(path, InternalIOErr.handle_err(err)))
+
+## Sets a file's length, creating the file if it doesn't exist. Grows or shrinks the file as needed; bytes past the new end are discarded.
+##
+## ```
+## Path.set_len!(Path.from_str("upload.bin"), 40_000_000_000)?
+## ```
+##
+## When growing on a filesystem that supports sparse files (ext4, btrfs, XFS, APFS, NTFS), the file's length grows but no data blocks are allocated for the new region until something writes to it. On filesystems without sparse support (FAT, exFAT) the grow reserves real blocks.
+##
+## > [`File.set_len!`](File#set_len!) does the same thing, except it takes a [Str] instead of a [Path].
+set_len! : Path, U64 => Result {} [FileWriteErr Path IOErr]
+set_len! = |path, len|
+    path_bytes = InternalPath.to_bytes(path)
+
+    Host.file_set_len!(path_bytes, len)
     |> Result.map_err(|err| FileWriteErr(path, InternalIOErr.handle_err(err)))
 
 ## Note that the path may not be valid depending on the filesystem where it is used.

@@ -146,168 +146,30 @@ pub fn random_bytes(length: u32) -> RocResult<RocList<u8>, RocStr> {
     }
 }
 
-/// Hash bytes with the specified algorithm. Returns hex digest.
+/// Hash bytes with the specified algorithm. Returns lowercase-hex digest.
+/// Panics on an unsupported algorithm — that's a programmer bug at the Roc
+/// platform boundary, not a user error.
 pub fn hash(bytes: &RocList<u8>, algorithm: &RocStr) -> RocStr {
     use sha1::Sha1;
-    use sha2::{Sha256, Sha384, Sha512, Digest};
+    use sha2::{Digest, Sha256, Sha384, Sha512};
 
-    let hex = match algorithm.as_str() {
-        "SHA-1" => {
-            let mut hasher = Sha1::new();
-            hasher.update(bytes.as_slice());
-            format!("{:x}", hasher.finalize())
-        }
-        "SHA-256" => {
-            let mut hasher = Sha256::new();
-            hasher.update(bytes.as_slice());
-            format!("{:x}", hasher.finalize())
-        }
-        "SHA-384" => {
-            let mut hasher = Sha384::new();
-            hasher.update(bytes.as_slice());
-            format!("{:x}", hasher.finalize())
-        }
-        "SHA-512" => {
-            let mut hasher = Sha512::new();
-            hasher.update(bytes.as_slice());
-            format!("{:x}", hasher.finalize())
-        }
-        other => format!("unsupported algorithm: {}", other),
+    let digest: Vec<u8> = match algorithm.as_str() {
+        "SHA-1" => Sha1::digest(bytes.as_slice()).to_vec(),
+        "SHA-256" => Sha256::digest(bytes.as_slice()).to_vec(),
+        "SHA-384" => Sha384::digest(bytes.as_slice()).to_vec(),
+        "SHA-512" => Sha512::digest(bytes.as_slice()).to_vec(),
+        other => panic!(
+            "Crypto: unsupported hash algorithm {:?}; expected SHA-1, SHA-256, SHA-384, or SHA-512",
+            other
+        ),
     };
+
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for b in &digest {
+        use std::fmt::Write;
+        let _ = write!(hex, "{:02x}", b);
+    }
     RocStr::from(hex.as_str())
-}
-
-/// Hash a file by path with the specified algorithm. Returns hex digest.
-pub fn hash_file(path: &RocStr, algorithm: &RocStr) -> RocResult<RocStr, RocStr> {
-    use sha1::Sha1;
-    use sha2::{Sha256, Sha384, Sha512, Digest};
-    use std::io::Read;
-
-    let mut file = match std::fs::File::open(path.as_str()) {
-        Ok(f) => f,
-        Err(e) => return RocResult::err(RocStr::from(format!("Failed to open file: {}", e).as_str())),
-    };
-
-    let mut buffer = Vec::new();
-    if let Err(e) = file.read_to_end(&mut buffer) {
-        return RocResult::err(RocStr::from(format!("Failed to read file: {}", e).as_str()));
-    }
-
-    let hex = match algorithm.as_str() {
-        "SHA-1" => {
-            let mut hasher = Sha1::new();
-            hasher.update(&buffer);
-            format!("{:x}", hasher.finalize())
-        }
-        "SHA-256" => {
-            let mut hasher = Sha256::new();
-            hasher.update(&buffer);
-            format!("{:x}", hasher.finalize())
-        }
-        "SHA-384" => {
-            let mut hasher = Sha384::new();
-            hasher.update(&buffer);
-            format!("{:x}", hasher.finalize())
-        }
-        "SHA-512" => {
-            let mut hasher = Sha512::new();
-            hasher.update(&buffer);
-            format!("{:x}", hasher.finalize())
-        }
-        other => return RocResult::err(RocStr::from(format!("Unsupported algorithm: {}", other).as_str())),
-    };
-    RocResult::ok(RocStr::from(hex.as_str()))
-}
-
-/// Hash a file in chunks. Computes hash of each chunk, concatenates the raw
-/// digest bytes, and hashes the concatenation. Same algorithm as the frontend
-/// `Crypto.hash_file_chunks!` in joy, so server-side and client-side hashes
-/// match for the same file + chunk size.
-pub fn hash_file_chunks(path: &RocStr, algorithm: &RocStr, chunk_size_bytes: u64) -> RocResult<RocStr, RocStr> {
-    use sha1::Sha1;
-    use sha2::{Sha256, Sha384, Sha512, Digest};
-    use std::io::Read;
-
-    let chunk_size = if chunk_size_bytes == 0 { 1 } else { chunk_size_bytes as usize };
-
-    let mut file = match std::fs::File::open(path.as_str()) {
-        Ok(f) => f,
-        Err(e) => return RocResult::err(RocStr::from(format!("Failed to open file: {}", e).as_str())),
-    };
-
-    let mut chunk_digests: Vec<u8> = Vec::new();
-    let mut buffer = vec![0u8; chunk_size];
-
-    loop {
-        let mut filled = 0usize;
-        // Read until we fill the buffer or hit EOF
-        while filled < chunk_size {
-            match file.read(&mut buffer[filled..]) {
-                Ok(0) => break,
-                Ok(n) => filled += n,
-                Err(e) => return RocResult::err(RocStr::from(format!("Failed to read file: {}", e).as_str())),
-            }
-        }
-        if filled == 0 {
-            break;
-        }
-        let chunk = &buffer[..filled];
-
-        match algorithm.as_str() {
-            "SHA-1" => {
-                let mut h = Sha1::new();
-                h.update(chunk);
-                chunk_digests.extend_from_slice(&h.finalize());
-            }
-            "SHA-256" => {
-                let mut h = Sha256::new();
-                h.update(chunk);
-                chunk_digests.extend_from_slice(&h.finalize());
-            }
-            "SHA-384" => {
-                let mut h = Sha384::new();
-                h.update(chunk);
-                chunk_digests.extend_from_slice(&h.finalize());
-            }
-            "SHA-512" => {
-                let mut h = Sha512::new();
-                h.update(chunk);
-                chunk_digests.extend_from_slice(&h.finalize());
-            }
-            other => return RocResult::err(RocStr::from(format!("Unsupported algorithm: {}", other).as_str())),
-        }
-
-        if filled < chunk_size {
-            break;
-        }
-    }
-
-    // Hash the concatenated chunk digests with the same algorithm
-    let final_hex = match algorithm.as_str() {
-        "SHA-1" => {
-            let mut h = Sha1::new();
-            h.update(&chunk_digests);
-            format!("{:x}", h.finalize())
-        }
-        "SHA-256" => {
-            let mut h = Sha256::new();
-            h.update(&chunk_digests);
-            format!("{:x}", h.finalize())
-        }
-        "SHA-384" => {
-            let mut h = Sha384::new();
-            h.update(&chunk_digests);
-            format!("{:x}", h.finalize())
-        }
-        "SHA-512" => {
-            let mut h = Sha512::new();
-            h.update(&chunk_digests);
-            format!("{:x}", h.finalize())
-        }
-        other => return RocResult::err(RocStr::from(format!("Unsupported algorithm: {}", other).as_str())),
-    };
-
-    RocResult::ok(RocStr::from(final_hex.as_str()))
 }
 
 /// Hashes a password using bcrypt.

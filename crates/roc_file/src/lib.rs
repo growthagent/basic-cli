@@ -43,6 +43,93 @@ fn write_slice(roc_path: &RocList<u8>, bytes: &[u8]) -> RocResult<(), IOErr> {
     }
 }
 
+pub fn file_read_bytes_at(
+    roc_path: &RocList<u8>,
+    offset: u64,
+    len: u64,
+) -> RocResult<RocList<u8>, IOErr> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .open(path_from_roc_path(roc_path))
+        {
+            Ok(file) => {
+                let cap = match usize::try_from(len) {
+                    Ok(n) => n,
+                    Err(_) => {
+                        return RocResult::err(IOErr {
+                            msg: format!("Read length {} too large for usize", len)
+                                .as_str()
+                                .into(),
+                            tag: IOErrTag::Other,
+                        });
+                    }
+                };
+                let mut buf = vec![0u8; cap];
+                match file.read_exact_at(&mut buf, offset) {
+                    Ok(()) => RocResult::ok(RocList::from(buf.as_slice())),
+                    Err(err) => RocResult::err(err.into()),
+                }
+            }
+            Err(err) => RocResult::err(err.into()),
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = (roc_path, offset, len);
+        RocResult::err(IOErr {
+            msg: "Not yet implemented on windows.".into(),
+            tag: IOErrTag::Unsupported,
+        })
+    }
+}
+
+pub fn file_write_bytes_at(
+    roc_path: &RocList<u8>,
+    offset: u64,
+    roc_bytes: &RocList<u8>,
+) -> RocResult<(), IOErr> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .open(path_from_roc_path(roc_path))
+        {
+            Ok(file) => match file.write_all_at(roc_bytes.as_slice(), offset) {
+                Ok(()) => RocResult::ok(()),
+                Err(err) => RocResult::err(err.into()),
+            },
+            Err(err) => RocResult::err(err.into()),
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = (roc_path, offset, roc_bytes);
+        RocResult::err(IOErr {
+            msg: "Not yet implemented on windows.".into(),
+            tag: IOErrTag::Unsupported,
+        })
+    }
+}
+
+pub fn file_set_len(roc_path: &RocList<u8>, len: u64) -> RocResult<(), IOErr> {
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path_from_roc_path(roc_path))
+    {
+        Ok(file) => match file.set_len(len) {
+            Ok(()) => RocResult::ok(()),
+            Err(err) => RocResult::err(err.into()),
+        },
+        Err(err) => RocResult::err(err.into()),
+    }
+}
+
 #[repr(C)]
 pub struct InternalPathType {
     is_dir: bool,

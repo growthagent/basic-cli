@@ -3,9 +3,12 @@ module [
     Reader,
     write_utf8!,
     write_bytes!,
+    write_bytes_at!,
     write!,
+    set_len!,
     read_utf8!,
     read_bytes!,
+    read_bytes_at!,
     delete!,
     is_dir!,
     is_file!,
@@ -110,6 +113,47 @@ write_bytes! = |bytes, path_str|
 write_utf8! : Str, Str => Result {} [FileWriteErr Path IOErr]
 write_utf8! = |str, path_str|
     Path.write_utf8!(str, Path.from_str(path_str))
+
+## Writes bytes to a file at a specific byte offset. Unix only; returns `Unsupported` on Windows.
+##
+## ```
+## File.write_bytes_at!([1, 2, 3], 16, "sparse.bin")?
+## ```
+##
+## The file must already exist; use [File.set_len!] to create it first. This is deliberate: callers (e.g. chunked-upload protocols) typically allocate the final size up front, so a missing file at write time is a real bug rather than a recoverable state.
+##
+## Writing past the current end extends the file with zeros in the gap. Concurrent calls at non-overlapping offsets are safe — wraps POSIX `pwrite`, which doesn't touch the file's seek position.
+##
+## > [Path.write_bytes_at!] does the same thing, except it takes a [Path] instead of a [Str].
+write_bytes_at! : List U8, U64, Str => Result {} [FileWriteErr Path IOErr]
+write_bytes_at! = |bytes, offset, path_str|
+    Path.write_bytes_at!(bytes, offset, Path.from_str(path_str))
+
+## Reads exactly `len` bytes from a file starting at `offset`. Unix only; returns `Unsupported` on Windows.
+##
+## ```
+## bytes = File.read_bytes_at!("sparse.bin", 16, 1024)?
+## ```
+##
+## Wraps POSIX `pread`. Errors if the requested range goes past the end of the file. Concurrent reads at any offsets are safe.
+##
+## > [Path.read_bytes_at!] does the same thing, except it takes a [Path] instead of a [Str].
+read_bytes_at! : Str, U64, U64 => Result (List U8) [FileReadErr Path IOErr]
+read_bytes_at! = |path_str, offset, len|
+    Path.read_bytes_at!(Path.from_str(path_str), offset, len)
+
+## Sets a file's length, creating the file if it doesn't exist. Grows or shrinks the file as needed; bytes past the new end are discarded.
+##
+## ```
+## File.set_len!("upload.bin", 40_000_000_000)?
+## ```
+##
+## When growing on a filesystem that supports sparse files (ext4, btrfs, XFS, APFS, NTFS), the file's length grows but no data blocks are allocated for the new region until something writes to it. On filesystems without sparse support (FAT, exFAT) the grow reserves real blocks.
+##
+## > [Path.set_len!] does the same thing, except it takes a [Path] instead of a [Str].
+set_len! : Str, U64 => Result {} [FileWriteErr Path IOErr]
+set_len! = |path_str, len|
+    Path.set_len!(Path.from_str(path_str), len)
 
 ## Deletes a file from the filesystem.
 ##

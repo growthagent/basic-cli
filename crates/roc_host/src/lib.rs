@@ -314,6 +314,9 @@ pub fn init() {
         roc_fx_tty_mode_raw as _,
         roc_fx_file_write_utf8 as _,
         roc_fx_file_write_bytes as _,
+        roc_fx_file_read_bytes_at as _,
+        roc_fx_file_write_bytes_at as _,
+        roc_fx_file_set_len as _,
         roc_fx_path_type as _,
         roc_fx_file_read_bytes as _,
         roc_fx_file_reader as _,
@@ -381,8 +384,6 @@ pub fn init() {
         roc_fx_bcrypt_hash as _,
         roc_fx_bcrypt_verify as _,
         roc_fx_hash as _,
-        roc_fx_hash_file as _,
-        roc_fx_hash_file_chunks as _,
     ];
     #[allow(forgetting_references)]
     std::mem::forget(std::hint::black_box(funcs));
@@ -515,6 +516,32 @@ pub extern "C" fn roc_fx_file_write_bytes(
     roc_bytes: &RocList<u8>,
 ) -> RocResult<(), roc_io_error::IOErr> {
     roc_file::file_write_bytes(roc_path, roc_bytes)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_file_read_bytes_at(
+    roc_path: &RocList<u8>,
+    offset: u64,
+    len: u64,
+) -> RocResult<RocList<u8>, roc_io_error::IOErr> {
+    roc_file::file_read_bytes_at(roc_path, offset, len)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_file_write_bytes_at(
+    roc_path: &RocList<u8>,
+    offset: u64,
+    roc_bytes: &RocList<u8>,
+) -> RocResult<(), roc_io_error::IOErr> {
+    roc_file::file_write_bytes_at(roc_path, offset, roc_bytes)
+}
+
+#[no_mangle]
+pub extern "C" fn roc_fx_file_set_len(
+    roc_path: &RocList<u8>,
+    len: u64,
+) -> RocResult<(), roc_io_error::IOErr> {
+    roc_file::file_set_len(roc_path, len)
 }
 
 #[no_mangle]
@@ -1048,15 +1075,5 @@ pub extern "C" fn roc_fx_bcrypt_verify(password: &RocList<u8>, hash: &RocStr) ->
 #[no_mangle]
 pub extern "C" fn roc_fx_hash(bytes: &RocList<u8>, algorithm: &RocStr) -> RocStr {
     roc_crypto::hash(bytes, algorithm)
-}
-
-#[no_mangle]
-pub extern "C" fn roc_fx_hash_file(path: &RocStr, algorithm: &RocStr) -> RocResult<RocStr, RocStr> {
-    roc_crypto::hash_file(path, algorithm)
-}
-
-#[no_mangle]
-pub extern "C" fn roc_fx_hash_file_chunks(path: &RocStr, algorithm: &RocStr, chunk_size_bytes: u64) -> RocResult<RocStr, RocStr> {
-    roc_crypto::hash_file_chunks(path, algorithm, chunk_size_bytes)
 }
 
