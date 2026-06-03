@@ -429,6 +429,53 @@ main! = |_args|
     # Verify all dead
     verify_all_dead!(stress_procs)?
 
+    # === Large output via poll! (pipe-drain deadlock regression) ===
+    # A child that writes far more than the ~64KB pipe buffer on both streams
+    # before exiting. If the pipes are only read after the child exits, the
+    # child blocks on write and never exits, so the poll! loop never finishes.
+    # Draining at spawn keeps the pipes empty so it completes.
+    # "stdoutline\n" is 11 bytes, "errline\n" is 8 bytes.
+    flood = Cmd.new("sh")
+        |> Cmd.args(["-c", "yes stdoutline | head -n 50000; yes errline | head -n 50000 >&2; exit 3"])
+        |> Cmd.spawn_grouped!()?
+    flood_result = poll_until_exited!(flood, 1000)?
+    if flood_result.exit_code != 3 then
+        Err(FailedExpectation("flood poll!: expected exit 3, got ${Num.to_str(flood_result.exit_code)}"))?
+    else if List.len(flood_result.stdout) != (50000 * 11) then
+        Err(FailedExpectation("flood poll!: stdout expected ${Num.to_str(50000 * 11)} bytes, got ${Num.to_str(List.len(flood_result.stdout))}"))?
+    else if List.len(flood_result.stderr) != (50000 * 8) then
+        Err(FailedExpectation("flood poll!: stderr expected ${Num.to_str(50000 * 8)} bytes, got ${Num.to_str(List.len(flood_result.stderr))}"))?
+    else
+        {}
+
+    # === Same flood via plain spawn! (non-grouped) and poll! ===
+    # "ngline\n" is 7 bytes.
+    flood_ng = Cmd.new("sh")
+        |> Cmd.args(["-c", "yes ngline | head -n 50000; exit 5"])
+        |> Cmd.spawn!()?
+    flood_ng_result = poll_until_exited!(flood_ng, 1000)?
+    if flood_ng_result.exit_code != 5 then
+        Err(FailedExpectation("flood spawn! poll!: expected exit 5, got ${Num.to_str(flood_ng_result.exit_code)}"))?
+    else if List.len(flood_ng_result.stdout) != (50000 * 7) then
+        Err(FailedExpectation("flood spawn! poll!: stdout expected ${Num.to_str(50000 * 7)} bytes, got ${Num.to_str(List.len(flood_ng_result.stdout))}"))?
+    else
+        {}
+
+    # === read_stdout! partial consumption (buffer larger than request) ===
+    # Write 10 bytes, then read 5 and 5. The buffer should serve from the front
+    # and leave the rest for the next read.
+    partial = Cmd.new("cat") |> Cmd.spawn_grouped!()?
+    partial.write_stdin!(Str.to_utf8("0123456789"))?
+    first_half = partial.read_stdout!(5)?
+    second_half = partial.read_stdout!(5)?
+    if first_half != Str.to_utf8("01234") then
+        Err(FailedExpectation("partial read: first 5 expected '01234', got ${Inspect.to_str(first_half)}"))?
+    else if second_half != Str.to_utf8("56789") then
+        Err(FailedExpectation("partial read: next 5 expected '56789', got ${Inspect.to_str(second_half)}"))?
+    else
+        {}
+    partial.kill!({})?
+
     Stdout.line!("All spawn_grouped! tests passed.")
 
 ## Poll a process until it exits, with max retries

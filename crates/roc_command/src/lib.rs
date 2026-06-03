@@ -2,10 +2,10 @@
 
 use command_group::{CommandGroup, GroupChild};
 use roc_std::{RocList, RocRefcounted, RocResult, RocStr};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Stdio};
-use std::sync::{Mutex, MutexGuard};
+use std::process::{Child, ChildStdin, Stdio};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 
 /// Lock a mutex, recovering if it was poisoned by a panic in another thread.
@@ -13,38 +13,113 @@ fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Read stdout and stderr concurrently to avoid deadlock when both pipes have large data.
+/// Background reader that drains a child's stdout or stderr pipe into an
+/// in-memory buffer, starting at spawn time.
 ///
-/// Without concurrent reading, if both pipes fill their buffers (~64KB each), the child
-/// blocks writing and the parent blocks reading, causing deadlock.
+/// Without it nothing reads the pipe until the child exits. A child that writes
+/// more than the OS pipe buffer (around 64KB) then blocks on its next write and
+/// never exits, so poll! and wait! hang until a timeout kills it. Draining from
+/// spawn lets the child keep writing. read_stdout! and read_stderr! serve from
+/// the buffer, and wait! and poll! return whatever has built up.
 ///
-/// Returns individual results for each pipe so callers can handle partial success.
-fn read_pipes_concurrently(
-    stdout: Option<ChildStdout>,
-    stderr: Option<std::process::ChildStderr>,
-) -> (std::io::Result<Vec<u8>>, std::io::Result<Vec<u8>>) {
-    let stdout_handle = stdout.map(|mut pipe| {
-        thread::spawn(move || {
-            let mut bytes = Vec::new();
-            pipe.read_to_end(&mut bytes).map(|_| bytes)
-        })
-    });
+/// The buffer is unbounded. A child that writes without limit grows it without
+/// limit, so we trade the deadlock for memory use. That is fine for the normal
+/// case of KB to MB of output. We can add a cap later if a runaway child turns
+/// out to matter.
+struct StreamReader {
+    shared: Arc<(Mutex<StreamState>, Condvar)>,
+    handle: Option<thread::JoinHandle<()>>,
+}
 
-    let stderr_handle = stderr.map(|mut pipe| {
-        thread::spawn(move || {
-            let mut bytes = Vec::new();
-            pipe.read_to_end(&mut bytes).map(|_| bytes)
-        })
-    });
+struct StreamState {
+    data: VecDeque<u8>,
+    eof: bool,
+    err: Option<std::io::Error>,
+}
 
-    let stdout_result = stdout_handle
-        .map(|h| h.join().unwrap_or_else(|_| Ok(Vec::new())))
-        .unwrap_or_else(|| Ok(Vec::new()));
-    let stderr_result = stderr_handle
-        .map(|h| h.join().unwrap_or_else(|_| Ok(Vec::new())))
-        .unwrap_or_else(|| Ok(Vec::new()));
+impl StreamReader {
+    /// Start a thread draining `pipe` into a buffer. A None pipe gives back an
+    /// already-closed reader with no bytes and immediate EOF.
+    fn spawn<R: Read + Send + 'static>(pipe: Option<R>) -> Self {
+        let shared = Arc::new((
+            Mutex::new(StreamState {
+                data: VecDeque::new(),
+                eof: pipe.is_none(),
+                err: None,
+            }),
+            Condvar::new(),
+        ));
 
-    (stdout_result, stderr_result)
+        let handle = pipe.map(|mut pipe| {
+            let shared = Arc::clone(&shared);
+            thread::spawn(move || {
+                let (lock, cv) = &*shared;
+                let mut chunk = [0u8; 16 * 1024];
+                loop {
+                    match pipe.read(&mut chunk) {
+                        Ok(0) => {
+                            lock_or_recover(lock).eof = true;
+                            cv.notify_all();
+                            break;
+                        }
+                        Ok(n) => {
+                            lock_or_recover(lock).data.extend(&chunk[..n]);
+                            cv.notify_all();
+                        }
+                        // Retry on signal interruption rather than treating it as EOF.
+                        Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(e) => {
+                            let mut state = lock_or_recover(lock);
+                            state.err = Some(e);
+                            state.eof = true;
+                            cv.notify_all();
+                            break;
+                        }
+                    }
+                }
+            })
+        });
+
+        StreamReader { shared, handle }
+    }
+
+    /// Block until exactly `num_bytes` are buffered, then take them from the
+    /// front. Like the old read_exact, if the stream reaches EOF with fewer
+    /// bytes available it returns UnexpectedEof.
+    fn read_exact_n(&self, num_bytes: u64) -> RocResult<RocList<u8>, roc_io_error::IOErr> {
+        let n = num_bytes as usize;
+        let (lock, cv) = &*self.shared;
+        let mut state = lock_or_recover(lock);
+        loop {
+            if state.data.len() >= n {
+                let bytes: Vec<u8> = state.data.drain(..n).collect();
+                return RocResult::ok(RocList::from(&bytes[..]));
+            }
+            if let Some(err) = state.err.take() {
+                return RocResult::err(err.into());
+            }
+            if state.eof {
+                return RocResult::err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+            }
+            state = cv.wait(state).unwrap_or_else(|p| p.into_inner());
+        }
+    }
+
+    /// Wait for the stream to close and return everything still buffered. Called
+    /// by wait! and poll! once the child has exited or is about to. We join the
+    /// drain thread before taking the lock, not while holding it, so we can't
+    /// deadlock against the thread that needs the lock to push its last bytes.
+    fn drain_remaining(&mut self) -> std::io::Result<Vec<u8>> {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        let (lock, _cv) = &*self.shared;
+        let mut state = lock_or_recover(lock);
+        if let Some(err) = state.err.take() {
+            return Err(err);
+        }
+        Ok(state.data.drain(..).collect())
+    }
 }
 
 // =============================================================================
@@ -71,11 +146,15 @@ impl ChildLike for GroupChild {
 }
 
 /// Generic process struct used by both spawn! and spawn_grouped!
+///
+/// stdout and stderr are drained into in-memory buffers by background threads
+/// started at spawn time (see StreamReader). stdin stays a raw handle that we
+/// write to on demand.
 struct Process<C> {
     child: C,
     stdin: Option<ChildStdin>,
-    stdout: Option<ChildStdout>,
-    stderr: Option<std::process::ChildStderr>,
+    stdout: StreamReader,
+    stderr: StreamReader,
 }
 
 /// Write bytes to a process's stdin
@@ -97,40 +176,6 @@ fn write_to_stdin(stdin: &mut Option<ChildStdin>, bytes: &[u8]) -> RocResult<(),
     }
 }
 
-/// Read exactly n bytes from stdout
-fn read_from_stdout(stdout: &mut Option<ChildStdout>, num_bytes: u64) -> RocResult<RocList<u8>, roc_io_error::IOErr> {
-    match stdout {
-        Some(ref mut handle) => {
-            let mut buffer = vec![0u8; num_bytes as usize];
-            match handle.read_exact(&mut buffer) {
-                Ok(()) => RocResult::ok(RocList::from(&buffer[..])),
-                Err(err) => RocResult::err(err.into()),
-            }
-        }
-        None => RocResult::err(roc_io_error::IOErr {
-            tag: roc_io_error::IOErrTag::Other,
-            msg: "Process stdout not available".into(),
-        }),
-    }
-}
-
-/// Read exactly n bytes from stderr
-fn read_from_stderr(stderr: &mut Option<std::process::ChildStderr>, num_bytes: u64) -> RocResult<RocList<u8>, roc_io_error::IOErr> {
-    match stderr {
-        Some(ref mut handle) => {
-            let mut buffer = vec![0u8; num_bytes as usize];
-            match handle.read_exact(&mut buffer) {
-                Ok(()) => RocResult::ok(RocList::from(&buffer[..])),
-                Err(err) => RocResult::err(err.into()),
-            }
-        }
-        None => RocResult::err(roc_io_error::IOErr {
-            tag: roc_io_error::IOErrTag::Other,
-            msg: "Process stderr not available".into(),
-        }),
-    }
-}
-
 /// Kill a process and reap it
 fn kill_process<C: ChildLike>(process: &mut Process<C>) -> RocResult<(), roc_io_error::IOErr> {
     match process.child.kill() {
@@ -144,17 +189,13 @@ fn kill_process<C: ChildLike>(process: &mut Process<C>) -> RocResult<(), roc_io_
 
 /// Wait for a process to exit and return its output
 fn wait_for_process<C: ChildLike>(process: &mut Process<C>) -> RocResult<ProcessOutput, roc_io_error::IOErr> {
-    let (stdout_result, stderr_result) = read_pipes_concurrently(
-        process.stdout.take(),
-        process.stderr.take(),
-    );
-
-    // Propagate pipe read errors
-    let stdout_bytes = match stdout_result {
+    // The drain threads have been emptying the pipes since spawn. Collect what
+    // they buffered and wait for EOF, then reap the child.
+    let stdout_bytes = match process.stdout.drain_remaining() {
         Ok(bytes) => bytes,
         Err(err) => return RocResult::err(err.into()),
     };
-    let stderr_bytes = match stderr_result {
+    let stderr_bytes = match process.stderr.drain_remaining() {
         Ok(bytes) => bytes,
         Err(err) => return RocResult::err(err.into()),
     };
@@ -176,12 +217,8 @@ fn wait_for_process<C: ChildLike>(process: &mut Process<C>) -> RocResult<Process
 fn poll_process<C: ChildLike>(process: &mut Process<C>) -> Result<Option<ProcessOutput>, std::io::Error> {
     match process.child.try_wait()? {
         Some(status) => {
-            let (stdout_result, stderr_result) = read_pipes_concurrently(
-                process.stdout.take(),
-                process.stderr.take(),
-            );
-            let stdout_bytes = stdout_result?;
-            let stderr_bytes = stderr_result?;
+            let stdout_bytes = process.stdout.drain_remaining()?;
+            let stderr_bytes = process.stderr.drain_remaining()?;
             let exit_code = status.code().unwrap_or(-1);
             Ok(Some(ProcessOutput {
                 stdout_bytes: RocList::from(&stdout_bytes[..]),
@@ -390,8 +427,8 @@ pub fn command_spawn_with_pipes(roc_cmd: &Command) -> RocResult<u64, roc_io_erro
 
             let process = Process {
                 stdin: child.stdin.take(),
-                stdout: child.stdout.take(),
-                stderr: child.stderr.take(),
+                stdout: StreamReader::spawn(child.stdout.take()),
+                stderr: StreamReader::spawn(child.stderr.take()),
                 child,
             };
 
@@ -415,7 +452,7 @@ pub fn process_write_bytes(process_id: u64, bytes: &RocList<u8>) -> RocResult<()
 pub fn process_read_bytes(process_id: u64, num_bytes: u64) -> RocResult<RocList<u8>, roc_io_error::IOErr> {
     let mut processes = lock_or_recover(&PROCESSES);
     match processes.get_mut(&process_id) {
-        Some(process) => read_from_stdout(&mut process.stdout, num_bytes),
+        Some(process) => process.stdout.read_exact_n(num_bytes),
         None => RocResult::err(not_found_error("Process not found")),
     }
 }
@@ -424,7 +461,7 @@ pub fn process_read_bytes(process_id: u64, num_bytes: u64) -> RocResult<RocList<
 pub fn process_read_stderr_bytes(process_id: u64, num_bytes: u64) -> RocResult<RocList<u8>, roc_io_error::IOErr> {
     let mut processes = lock_or_recover(&PROCESSES);
     match processes.get_mut(&process_id) {
-        Some(process) => read_from_stderr(&mut process.stderr, num_bytes),
+        Some(process) => process.stderr.read_exact_n(num_bytes),
         None => RocResult::err(not_found_error("Process not found")),
     }
 }
@@ -601,12 +638,11 @@ const _: () = {
 /// Returns `Running` if the process is still running, or `Exited { ... }` with
 /// the exit code and output if the process has finished.
 ///
-/// When returning `Exited`, the process is removed from the map and subsequent
-/// calls will return `NotFound`. The stdout/stderr are read in full.
-///
-/// Note: Read errors on stdout/stderr are silently ignored (returns empty bytes).
-/// This matches `process_wait` behavior and is safe because read errors on pipes
-/// from exited processes are extremely rare (data is kernel-buffered).
+/// When returning `Exited`, the process is removed from the map and later calls
+/// return `NotFound`. stdout and stderr were drained into in-memory buffers by
+/// the background reader threads since spawn (see StreamReader), so this returns
+/// everything they read. A read error on either stream is returned as an error
+/// instead of being dropped.
 pub fn process_poll(process_id: u64) -> RocResult<PollResult, roc_io_error::IOErr> {
     let mut processes = lock_or_recover(&PROCESSES);
 
@@ -668,8 +704,8 @@ pub fn command_spawn_grouped(roc_cmd: &Command) -> RocResult<u64, roc_io_error::
 
             let process = Process {
                 stdin: child.inner().stdin.take(),
-                stdout: child.inner().stdout.take(),
-                stderr: child.inner().stderr.take(),
+                stdout: StreamReader::spawn(child.inner().stdout.take()),
+                stderr: StreamReader::spawn(child.inner().stderr.take()),
                 child,
             };
 
@@ -737,7 +773,7 @@ pub fn grouped_process_write_bytes(process_id: u64, bytes: &RocList<u8>) -> RocR
 pub fn grouped_process_read_bytes(process_id: u64, num_bytes: u64) -> RocResult<RocList<u8>, roc_io_error::IOErr> {
     let mut processes = lock_or_recover(&GROUPED_PROCESSES);
     match processes.get_mut(&process_id) {
-        Some(process) => read_from_stdout(&mut process.stdout, num_bytes),
+        Some(process) => process.stdout.read_exact_n(num_bytes),
         None => RocResult::err(not_found_error("Grouped process not found")),
     }
 }
@@ -746,7 +782,7 @@ pub fn grouped_process_read_bytes(process_id: u64, num_bytes: u64) -> RocResult<
 pub fn grouped_process_read_stderr_bytes(process_id: u64, num_bytes: u64) -> RocResult<RocList<u8>, roc_io_error::IOErr> {
     let mut processes = lock_or_recover(&GROUPED_PROCESSES);
     match processes.get_mut(&process_id) {
-        Some(process) => read_from_stderr(&mut process.stderr, num_bytes),
+        Some(process) => process.stderr.read_exact_n(num_bytes),
         None => RocResult::err(not_found_error("Grouped process not found")),
     }
 }

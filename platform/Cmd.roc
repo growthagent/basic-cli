@@ -248,8 +248,8 @@ args = |@Cmd(cmd), values|
 ## Returned by [spawn!]. Each function is bound to this specific child process.
 ##
 ## **Important**: `read_stdout!` and `read_stderr!` block until *exactly* N bytes
-## are available. If the process outputs fewer bytes than requested, the call
-## will hang indefinitely. Use these when you know the exact message size
+## have been read. If the stream reaches EOF before N bytes are available, the
+## call returns `ReadFailed`. Use these when you know the exact message size
 ## (e.g., length-prefixed protocols) or use `wait!` to read all output at once.
 ##
 ## Call `close_stdin!` to signal EOF to the child process. Many programs
