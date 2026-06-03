@@ -202,10 +202,19 @@ expect
 
     output == Ok(["Path"])
 
+# Drop full-line comments so a keyword that appears inside a comment (such as
+# the word "modules" in a doc comment) is not mistaken for the real header.
+strip_comments : Str -> Str
+strip_comments = |source_code|
+    source_code
+    |> Str.split_on("\n")
+    |> List.keep_if(|line| !Str.starts_with(Str.trim(line), "#"))
+    |> Str.join_with("\n")
+
 extract_exposes_list : Str -> Result (List Str) _
 extract_exposes_list = |source_code|
 
-    when Str.split_first(source_code, "exposes") is
+    when Str.split_first(strip_comments(source_code), "exposes") is
         Ok { after } ->
             trimmed_after = Str.trim(after)
 
@@ -289,7 +298,7 @@ expect
 extract_module_list : Str -> Result (List Str) _
 extract_module_list = |source_code|
 
-    when Str.split_first(source_code, "module") is
+    when Str.split_first(strip_comments(source_code), "module") is
         Ok { after } ->
             trimmed_after = Str.trim(after)
 

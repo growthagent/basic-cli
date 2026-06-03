@@ -24,6 +24,9 @@ fi
 TESTS_DIR="$(dirname "$EXAMPLES_DIR")/tests/"
 export TESTS_DIR
 
+# Shared skip rules (also used by ./tests.sh)
+source ci/test_skip_rules.sh
+
 if [ "$NO_BUILD" != "1" ]; then
   # May be needed for breaking roc changes. Also replace platform in build.roc with `cli: platform "platform/main.roc",`
   ./jump-start.sh
@@ -103,7 +106,11 @@ for roc_file in $TESTS_DIR*.roc; do
     roc_file_only="$(basename "$roc_file")"
     no_ext_name=${roc_file_only%.*}
 
-    expect ci/expect_scripts/$no_ext_name.exp
+    # Self-verifying tests (such as the spawn suite) exit nonzero on failure and
+    # ship no golden-output script. Only run expect when one exists.
+    if [ -f "ci/expect_scripts/$no_ext_name.exp" ]; then
+        expect ci/expect_scripts/$no_ext_name.exp
+    fi
 done
 
 # remove Dir example directorys if they exist
@@ -148,6 +155,11 @@ done
 
 for roc_file in $TESTS_DIR*.roc; do
     base_file=$(basename "$roc_file")
+
+    # Helper files are spawned by other tests, not run standalone (they hang).
+    if is_helper_test "$base_file"; then
+        continue
+    fi
 
     # check if base_file matches something from ignore_list
     for file in "${ignore_list[@]}"; do

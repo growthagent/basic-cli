@@ -3,13 +3,16 @@ set -eo pipefail
 
 cd "$(dirname "$0")"
 
+# Shared skip rules (also used by ci/all_tests.sh)
+source ci/test_skip_rules.sh
+
 indent() {
     sed 's/^/    /'
 }
 
 for test_file in tests/*.roc; do
     # Skip helper files (not actual tests)
-    if [[ "$test_file" == *-helper.roc ]]; then
+    if is_helper_test "$test_file"; then
         continue
     fi
 
