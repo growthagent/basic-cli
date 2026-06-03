@@ -3,6 +3,8 @@
 dynhost
 target
 generated-docs
+release_docs
+temp_docs
 .direnv
 .envrc
 *.rs.bk
